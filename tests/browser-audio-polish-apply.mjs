@@ -13,8 +13,15 @@ function mime(path) {
   if (ext === ".html") return "text/html";
   if (ext === ".css") return "text/css";
   if (ext === ".js") return "text/javascript";
+  if (ext === ".wav") return "audio/wav";
   return "application/octet-stream";
 }
+
+const UPLOAD_FIXTURES = [
+  join(root, "fixtures/imported-tracks/host-synced.wav"),
+  join(root, "fixtures/imported-tracks/guest-1-synced.wav"),
+  join(root, "fixtures/imported-tracks/guest-2-synced.wav"),
+];
 
 function startServer() {
   return new Promise((resolve) => {
@@ -41,7 +48,7 @@ async function completeSetup(page) {
   await page.locator("#f-sp-1-name").fill("Dana Kim");
   await page.locator("#f-sp-2-name").fill("Alex Chen");
   await page.locator(".setup-preset-card").first().click();
-  await page.locator(".guided-workspace").waitFor({ state: "visible" });
+  await page.locator(".guided-workspace").waitFor({ state: "visible", timeout: 60000 });
 }
 
 async function resumeWorkspaceAfterReload(page) {

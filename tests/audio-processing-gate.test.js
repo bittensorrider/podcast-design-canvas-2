@@ -13,6 +13,7 @@ const audio = require("../app/audio-polish.js");
 const workspace = require("../app/episode-workspace.js");
 const exportModel = require("../app/episode-export.js");
 const review = require("../app/publish-review.js");
+const mae = require("../app/media-audio-extract.js");
 
 const uiSource = fs.readFileSync(path.join(__dirname, "../app/episode-setup.ui.js"), "utf8");
 const stylesSource = fs.readFileSync(path.join(__dirname, "../app/styles.css"), "utf8");
@@ -128,19 +129,21 @@ test("REGRESSION (PR #249 review): the style-preset explore/preview shortcut mus
   );
 });
 
-test("REGRESSION (#197 PR #250): episode summarize captures imported source audio for every speaker track", () => {
+test("REGRESSION (#197 PR #251): episode summarize loads decoded fixture speaker tracks", () => {
   const episode = readyEpisode();
   episode.speakers.forEach((speaker) => {
-    assert.ok(speaker.sourceAudioBase64, "import must capture durable source audio before polish runs");
+    assert.ok(speaker.sourceAudioBase64, "import must attach decoded speaker-track audio before polish runs");
+    assert.ok(mae.isValidWav(mae.base64ToBytes(speaker.sourceAudioBase64)));
   });
 });
 
-test("REGRESSION (#197 PR #250): polish transforms captured source bytes — output is not metadata synthesis", () => {
+test("REGRESSION (#197 PR #251): polish transforms decoded fixture PCM — not metadata synthesis", () => {
   const episode = readyEpisode();
   const polish = audio.createPolish(episode);
-  const source = polish.speakers[0].sourceAudioBase64;
+  const source = mae.decodeWav(mae.base64ToBytes(polish.speakers[0].sourceAudioBase64)).samples;
   const processed = audio.processTracks(polish);
-  assert.notStrictEqual(source, processed.speakers[0].assetBase64);
+  const polished = mae.decodeWav(mae.base64ToBytes(processed.speakers[0].assetBase64)).samples;
+  assert.notDeepStrictEqual(Array.from(source.slice(0, 64)), Array.from(polished.slice(0, 64)));
 });
 
 test("REGRESSION (#197 PR #249 follow-up): Apply audio & continue renders a visible, one-time completion confirmation", () => {

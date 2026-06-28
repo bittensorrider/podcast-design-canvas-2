@@ -144,142 +144,76 @@
   }
 
   // ---- Imported-track audio transformation (#197) -----------------------------
-  // Polish transforms the raw source audio bytes captured at import — never synthesizes
-  // independent tones from metadata labels alone.
+  // Polish decodes the imported PCM WAV, applies creator-facing treatment in the
+  // sample domain, and writes a new polished PCM WAV asset.
 
-  const BASE64_CHARS =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-  function base64ToBytes(base64) {
-    const text = String(base64 || "").replace(/=+$/, "");
-    const out = [];
-    for (let i = 0; i < text.length; i += 4) {
-      const c0 = BASE64_CHARS.indexOf(text[i]);
-      const c1 = BASE64_CHARS.indexOf(text[i + 1]);
-      const c2 = text[i + 2] === "=" ? -1 : BASE64_CHARS.indexOf(text[i + 2]);
-      const c3 = text[i + 3] === "=" ? -1 : BASE64_CHARS.indexOf(text[i + 3]);
-      const triplet = (c0 << 18) | (c1 << 12) | ((c2 < 0 ? 0 : c2) << 6) | (c3 < 0 ? 0 : c3);
-      out.push((triplet >> 16) & 0xff);
-      if (c2 >= 0) out.push((triplet >> 8) & 0xff);
-      if (c3 >= 0) out.push(triplet & 0xff);
+  function mediaExtractApi() {
+    if (typeof module !== "undefined" && module.exports && typeof require === "function") {
+      try {
+        return require("./media-audio-extract.js");
+      } catch (err) {
+        return null;
+      }
     }
-    return new Uint8Array(out);
+    const g = typeof window !== "undefined" ? window : globalThis;
+    return g.PdcMediaAudioExtract || null;
   }
 
   function bytesToBase64(bytes) {
-    let out = "";
-    for (let i = 0; i < bytes.length; i += 3) {
-      const b0 = bytes[i];
-      const hasB1 = i + 1 < bytes.length;
-      const hasB2 = i + 2 < bytes.length;
-      const b1 = hasB1 ? bytes[i + 1] : 0;
-      const b2 = hasB2 ? bytes[i + 2] : 0;
-      const triplet = (b0 << 16) | (b1 << 8) | b2;
-      out += BASE64_CHARS[(triplet >> 18) & 0x3f];
-      out += BASE64_CHARS[(triplet >> 12) & 0x3f];
-      out += hasB1 ? BASE64_CHARS[(triplet >> 6) & 0x3f] : "=";
-      out += hasB2 ? BASE64_CHARS[triplet & 0x3f] : "=";
-    }
-    return out;
+    const MAE = mediaExtractApi();
+    return MAE ? MAE.bytesToBase64(bytes) : "";
   }
 
-  function writeAscii(bytes, offset, text) {
-    for (let i = 0; i < text.length; i += 1) {
-      bytes[offset + i] = text.charCodeAt(i);
-    }
-  }
-
-  function writeUint32LE(bytes, offset, value) {
-    bytes[offset] = value & 0xff;
-    bytes[offset + 1] = (value >>> 8) & 0xff;
-    bytes[offset + 2] = (value >>> 16) & 0xff;
-    bytes[offset + 3] = (value >>> 24) & 0xff;
-  }
-
-  function writeUint16LE(bytes, offset, value) {
-    bytes[offset] = value & 0xff;
-    bytes[offset + 1] = (value >>> 8) & 0xff;
+  function base64ToBytes(base64) {
+    const MAE = mediaExtractApi();
+    return MAE ? MAE.base64ToBytes(base64) : new Uint8Array(0);
   }
 
   const LEVEL_INTENSITY = { light: 0.35, balanced: 0.6, strong: 0.9 };
 
-  function readAscii(bytes, offset, length) {
-    let out = "";
-    for (let i = 0; i < length; i += 1) {
-      out += String.fromCharCode(bytes[offset + i]);
-    }
-    return out;
-  }
-
-  function parseSourceWav(bytes) {
-    if (!bytes || bytes.length < 44) {
-      throw new Error("Imported source audio is missing or too short to process.");
-    }
-    if (readAscii(bytes, 0, 4) !== "RIFF" || readAscii(bytes, 8, 4) !== "WAVE") {
-      throw new Error("Imported source audio is not a valid WAV track.");
-    }
-    const sampleRate = bytes[24] | (bytes[25] << 8) | (bytes[26] << 16) | (bytes[27] << 24);
-    const samples = bytes.subarray(44);
-    if (!samples.length) {
-      throw new Error("Imported source audio has no sample data.");
-    }
-    return { samples, sampleRate };
-  }
-
-  function encodeWavFromSamples(samples, sampleRate) {
-    const headerSize = 44;
-    const out = new Uint8Array(headerSize + samples.length);
-    writeAscii(out, 0, "RIFF");
-    writeUint32LE(out, 4, 36 + samples.length);
-    writeAscii(out, 8, "WAVE");
-    writeAscii(out, 12, "fmt ");
-    writeUint32LE(out, 16, 16);
-    writeUint16LE(out, 20, 1);
-    writeUint16LE(out, 22, 1);
-    writeUint32LE(out, 24, sampleRate);
-    writeUint32LE(out, 28, sampleRate);
-    writeUint16LE(out, 32, 1);
-    writeUint16LE(out, 34, 8);
-    writeAscii(out, 36, "data");
-    writeUint32LE(out, 40, samples.length);
-    out.set(samples, headerSize);
-    return out;
-  }
-
-  // Applies creator-facing polish controls to the imported PCM samples.
   function transformImportedTrack(sourceBase64, polish) {
+    const MAE = mediaExtractApi();
+    if (!MAE) {
+      throw new Error("Audio extraction helpers are unavailable.");
+    }
     const state = polish || {};
-    const sourceBytes = base64ToBytes(sourceBase64);
-    const { samples, sampleRate } = parseSourceWav(sourceBytes);
-    const transformed = new Uint8Array(samples.length);
+    const decoded = MAE.decodeWav(MAE.base64ToBytes(sourceBase64));
+    const input = decoded.samples;
+    const output = new Int16Array(input.length);
     const noise = LEVEL_INTENSITY[state.noiseCleanup] || 0.6;
     const leveling = LEVEL_INTENSITY[state.leveling] || 0.6;
     const clarity = LEVEL_INTENSITY[state.speechClarity] || 0.6;
     const enhancement = LEVEL_INTENSITY[state.enhancement] || 0.6;
-    const gate = 10 + noise * 18;
-    const target = 34 + leveling * 22;
+    const gate = 900 + noise * 2200;
+    let peak = 1;
+    for (let i = 0; i < input.length; i += 1) {
+      peak = Math.max(peak, Math.abs(input[i]));
+    }
+    const targetPeak = 12000 + leveling * 9000;
 
-    for (let i = 0; i < samples.length; i += 1) {
-      let centered = samples[i] - 128;
-      const prev = i > 0 ? samples[i - 1] - 128 : centered;
-      const next = i + 1 < samples.length ? samples[i + 1] - 128 : centered;
+    for (let i = 0; i < input.length; i += 1) {
+      let sample = input[i];
+      const prev = i > 0 ? input[i - 1] : sample;
+      const next = i + 1 < input.length ? input[i + 1] : sample;
 
-      if (Math.abs(centered) < gate) {
-        centered *= 1 - noise;
+      if (Math.abs(sample) < gate) {
+        sample *= 1 - noise * 0.85;
       }
 
-      const transient = centered - prev;
-      centered += transient * clarity * 0.55;
+      const transient = sample - prev;
+      sample += transient * clarity * 0.45;
 
-      const warmth = (prev + centered + next) / 3;
-      centered = centered * (1 - enhancement * 0.25) + warmth * enhancement * 0.25;
+      const warmth = (prev + sample + next) / 3;
+      sample = sample * (1 - enhancement * 0.2) + warmth * enhancement * 0.2;
 
-      centered = centered * (1 - leveling * 0.35) + Math.sign(centered || 1) * target * leveling * 0.35;
+      if (peak > 0) {
+        sample = (sample / peak) * targetPeak;
+      }
 
-      transformed[i] = Math.max(0, Math.min(255, Math.round(centered + 128)));
+      output[i] = Math.max(-32768, Math.min(32767, Math.round(sample)));
     }
 
-    return encodeWavFromSamples(transformed, sampleRate || 8000);
+    return MAE.encodePcm16MonoWav(output, decoded.sampleRate);
   }
 
   // Under Node (the test/CLI harness for this shared model) actually persist the
@@ -330,7 +264,7 @@
           return Object.assign({}, track, {
             processed: false,
             status: "failed",
-            failureReason: "No imported source audio for this speaker track.",
+            failureReason: "No decoded speaker-track audio for this import yet.",
             processedAt: now,
             outputRef: null,
             processedSettingsKey: null,

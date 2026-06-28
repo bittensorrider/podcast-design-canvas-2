@@ -31,13 +31,14 @@
   const SP = window.PdcStylePreview;
   const PP = window.PdcPublishPackage;
   const TC = window.PdcTranscriptCorrection;
+  const MAE = window.PdcMediaAudioExtract;
   const root = document.getElementById("app");
   const stepIndicator = document.querySelector(".workflow-step-indicator");
   const stepCountEl = document.querySelector(".workflow-step-count");
   const stepLabelEl = document.querySelector(".workflow-step-label");
   const stepFillEl = document.querySelector(".workflow-step-fill");
   const stepPill = stepLabelEl || document.querySelector(".step-pill");
-  if (!ES || !root) {
+  if (!ES || !MAE || !root) {
     return;
   }
 
@@ -1994,6 +1995,105 @@
     return typeof value === "string" ? value.trim() : "";
   }
 
+  async function decodeUploadedMediaFile(file) {
+    if (!MAE) {
+      throw new Error("Audio helpers are unavailable.");
+    }
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) {
+      throw new Error("Web Audio is required to decode imported speaker media.");
+    }
+    const buffer = await file.arrayBuffer();
+    const ctx = new Ctx();
+    try {
+      const audioBuffer = await ctx.decodeAudioData(buffer.slice(0));
+      return MAE.encodeAudioBufferAsWav(audioBuffer);
+    } catch (decodeErr) {
+      return extractAudioFromVideoFile(file);
+    } finally {
+      if (ctx.state !== "closed") {
+        await ctx.close();
+      }
+    }
+  }
+
+  async function extractAudioFromVideoFile(file) {
+    if (!MAE) {
+      throw new Error("Audio helpers are unavailable.");
+    }
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) {
+      throw new Error("Web Audio is required to extract speaker audio from video.");
+    }
+    const url = URL.createObjectURL(file);
+    const video = document.createElement("video");
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = "auto";
+    video.src = url;
+    video.style.position = "absolute";
+    video.style.left = "-9999px";
+    document.body.appendChild(video);
+    try {
+      await new Promise((resolve, reject) => {
+        video.onloadedmetadata = () => resolve();
+        video.onerror = () => reject(new Error("Could not load the uploaded video track."));
+      });
+      const duration = Math.min(Math.max(video.duration || 0.5, 0.25), 15);
+      const sampleRate = 44100;
+      const offline = new OfflineAudioContext(1, Math.ceil(duration * sampleRate), sampleRate);
+      const source = offline.createMediaElementSource(video);
+      source.connect(offline.destination);
+      await video.play();
+      const rendered = await offline.startRendering();
+      return MAE.encodeAudioBufferAsWav(rendered);
+    } finally {
+      video.pause();
+      video.remove();
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  async function fetchFixtureSourceAudioForSpeaker(speaker) {
+    if (!MAE || ES.speakerHasDecodedSourceAudio(speaker)) {
+      return;
+    }
+    const response = await fetch(MAE.roleFixturePath(speaker.role));
+    if (!response.ok) {
+      throw new Error(`Could not load synced speaker audio for ${speaker.role}.`);
+    }
+    const buffer = await response.arrayBuffer();
+    ES.attachDecodedSourceAudio(speaker, new Uint8Array(buffer));
+  }
+
+  function speakerSourceStatusLabel(speaker) {
+    if (ES.speakerHasDecodedSourceAudio(speaker)) {
+      const label = trim(speaker.fileName) || "Synced speaker track";
+      return `Selected: ${label} · speaker track ready`;
+    }
+    if (trim(speaker.fileName)) {
+      return `Selected: ${speaker.fileName} · decoding speaker track…`;
+    }
+    return "No file chosen yet";
+  }
+
+  async function ensureSpeakerTracksDecoded() {
+    if (!MAE) {
+      return;
+    }
+    const mode = ES.normalizeMode(state.sourceMode);
+    const speakers = Array.isArray(state.speakers) ? state.speakers : [];
+    if (mode === "riverside") {
+      await Promise.all(speakers.map((speaker) => fetchFixtureSourceAudioForSpeaker(speaker)));
+      return;
+    }
+    speakers.forEach((speaker) => {
+      if (trim(speaker.fileName) && !ES.speakerHasDecodedSourceAudio(speaker)) {
+        throw new Error(`Speaker audio for ${speaker.role} is still decoding.`);
+      }
+    });
+  }
+
   function renderSetupPresetSection(stepNum) {
     if (!STY || !SP) {
       return null;
@@ -2036,10 +2136,12 @@
         applySandboxHandoffSourceIfNeeded();
         activeTemplateId = null;
         canvasDoc = null;
-        if (tryCompleteSetupHandoff({ quiet: true })) {
-          return;
-        }
-        renderSetup();
+        tryCompleteSetupHandoff({ quiet: true }).then((ok) => {
+          if (!ok) {
+            renderSetup();
+          }
+        });
+        return;
       });
       grid.appendChild(card);
     });
@@ -2382,24 +2484,30 @@
       const chosen = el(
         "p",
         { class: "chosen-file" },
-        speaker.fileName ? `Selected: ${speaker.fileName}` : "No file chosen yet",
+        speakerSourceStatusLabel(speaker),
       );
       fileInput.addEventListener("change", (e) => {
         const file = e.target.files && e.target.files[0];
         if (!file) {
           speaker.fileName = "";
           speaker.fileSize = 0;
-          speaker.fileBytesBase64 = "";
           speaker.sourceAudioBase64 = "";
+          speaker.sourceAudioReady = false;
           chosen.textContent = "No file chosen yet";
           return;
         }
-        const reader = new FileReader();
-        reader.onload = () => {
-          ES.attachUploadedFileBytes(speaker, file.name, file.size, new Uint8Array(reader.result));
-          chosen.textContent = speaker.fileName ? `Selected: ${speaker.fileName}` : "No file chosen yet";
-        };
-        reader.readAsArrayBuffer(file);
+        ES.attachUploadedFileMeta(speaker, file.name, file.size);
+        chosen.textContent = `Decoding ${file.name}…`;
+        decodeUploadedMediaFile(file)
+          .then((wavBytes) => {
+            ES.attachDecodedSourceAudio(speaker, wavBytes);
+            chosen.textContent = speakerSourceStatusLabel(speaker);
+          })
+          .catch(() => {
+            speaker.sourceAudioBase64 = "";
+            speaker.sourceAudioReady = false;
+            chosen.textContent = `Could not decode speaker audio from ${file.name}`;
+          });
       });
       sourceBlock.appendChild(field("Speaker video file", fileInput, `speaker:${index}:source`));
       sourceBlock.appendChild(chosen);
@@ -2413,8 +2521,15 @@
       );
       placeholderBtn.addEventListener("click", () => {
         readSetupFormState();
-        ES.attachPlaceholderFile(speaker);
-        renderSetup();
+        speaker.fileName = ES.placeholderFileName(speaker.role);
+        speaker.fileSize = 1280000;
+        fetchFixtureSourceAudioForSpeaker(speaker)
+          .then(() => renderSetup())
+          .catch(() => {
+            errors = { [`speaker:${index}:source`]: `Could not attach synced audio for ${speaker.role}.` };
+            showErrors = true;
+            renderSetup();
+          });
       });
       sourceBlock.appendChild(
         el(
@@ -2598,7 +2713,7 @@
     return true;
   }
 
-  function tryCompleteSetupHandoff(options) {
+  async function tryCompleteSetupHandoff(options) {
     const opts = options && typeof options === "object" ? options : {};
     readSetupFormState();
     applySandboxHandoffSourceIfNeeded();
@@ -2624,7 +2739,23 @@
       }
       return false;
     }
+    try {
+      await ensureSpeakerTracksDecoded();
+    } catch (err) {
+      if (!opts.quiet) {
+        errors = { speakers: (err && err.message) || "Speaker tracks are still decoding." };
+        showErrors = true;
+      }
+      return false;
+    }
     state = ES.enrichDraftSourceAudio(state);
+    if (!ES.allSpeakersHaveDecodedSourceAudio(state)) {
+      if (!opts.quiet) {
+        errors = { speakers: "Each speaker track needs decoded audio before continuing." };
+        showErrors = true;
+      }
+      return false;
+    }
     const summary = ES.summarize(state);
     if (STY && styleSelection) {
       appliedStyle = STY.summarizeStyle(styleSelection, summary.speakerCount);
@@ -2641,9 +2772,11 @@
   }
 
   function onContinue() {
-    if (!tryCompleteSetupHandoff()) {
-      renderSetup();
-    }
+    tryCompleteSetupHandoff().then((ok) => {
+      if (!ok) {
+        renderSetup();
+      }
+    });
   }
 
   function focusFirstError() {
@@ -4904,19 +5037,32 @@
 
     const applyButton = el("button", { type: "button", class: "primary" }, "Apply audio & continue →");
     applyButton.addEventListener("click", () => {
-      audioPolish = AP.processTracks(audioPolish);
+      const latestSummary = ES.summarize(state);
+      const presetState = audioPolish || AP.createPolish(latestSummary);
+      let working = AP.createPolish(latestSummary);
+      working = AP.applyPreset(working, presetState.presetId);
+      working.noiseCleanup = presetState.noiseCleanup;
+      working.leveling = presetState.leveling;
+      working.speechClarity = presetState.speechClarity;
+      working.enhancement = presetState.enhancement;
+      audioPolish = AP.processTracks(working);
       appliedAudioPolish = AP.summarizePolish(audioPolish);
       persistEpisodeSession();
       if (!appliedAudioPolish.allTracksProcessed) {
         renderAudioPolish(summary);
         return;
       }
-      if (STY && !appliedStyle) {
-        renderStyle(summary);
-      } else {
-        audioPolishJustApplied = true;
-        renderWorkspace(summary);
-      }
+      renderAudioPolish(summary);
+      audioPolishJustApplied = true;
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
+          if (STY && !appliedStyle) {
+            renderStyle(summary);
+          } else {
+            renderWorkspace(summary);
+          }
+        });
+      });
     });
     const back = el("button", { type: "button", class: "ghost" }, "← Back to setup");
     back.addEventListener("click", () => {

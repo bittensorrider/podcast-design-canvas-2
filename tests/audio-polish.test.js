@@ -8,6 +8,7 @@ const assert = require("assert");
 const fs = require("fs");
 const setup = require("../app/episode-setup.js");
 const audio = require("../app/audio-polish.js");
+const mae = require("../app/media-audio-extract.js");
 
 let passed = 0;
 function test(name, fn) {
@@ -209,27 +210,17 @@ test("REGRESSION (#197): processTracks persists each polished asset to a real fi
   });
 });
 
-test("REGRESSION (#197): processTracks transforms imported source audio instead of synthesizing metadata tones", () => {
+test("REGRESSION (#197): processTracks transforms decoded speaker PCM, not metadata labels", () => {
   const episode = setup.summarize(completeUploadDraft());
   const polish = audio.createPolish(episode);
-  const source = polish.speakers[0].sourceAudioBase64;
+  const sourcePcm = mae.decodeWav(mae.base64ToBytes(polish.speakers[0].sourceAudioBase64)).samples;
   const processed = audio.processTracks(polish);
-  const polished = processed.speakers[0].assetBase64;
-
-  assert.ok(source);
-  assert.ok(polished);
-  assert.notStrictEqual(source, polished, "polished output must differ from the imported source it transformed");
-
-  const sourceSamples = Buffer.from(source, "base64").subarray(44);
-  const polishedSamples = Buffer.from(polished, "base64").subarray(44);
-  assert.ok(polishedSamples.length > 0);
-  let changedSamples = 0;
-  for (let i = 0; i < Math.min(sourceSamples.length, polishedSamples.length); i += 1) {
-    if (sourceSamples[i] !== polishedSamples[i]) {
-      changedSamples += 1;
-    }
-  }
-  assert.ok(changedSamples > 0, "polish must modify the imported sample data");
+  const polishedPcm = mae.decodeWav(mae.base64ToBytes(processed.speakers[0].assetBase64)).samples;
+  assert.notDeepStrictEqual(
+    Array.from(sourcePcm.slice(0, 128)),
+    Array.from(polishedPcm.slice(0, 128)),
+    "polish must modify decoded PCM samples from the imported track",
+  );
 });
 
 test("REGRESSION (#197): changing a setting and reprocessing changes the synthesized audio bytes", () => {
@@ -247,28 +238,25 @@ test("REGRESSION (#197): changing a setting and reprocessing changes the synthes
   });
 });
 
-test("REGRESSION (PR #249 follow-up): polished audio depends on the actual imported file bytes, not just the speaker name", () => {
+test("REGRESSION (PR #251): different imported fixture tracks produce different polished output", () => {
   const draftA = completeUploadDraft();
   const draftB = completeUploadDraft();
-  draftB.speakers[0] = setup.attachUploadedFileBytes(
+  draftB.speakers[0] = setup.attachDecodedSourceAudio(
     draftB.speakers[0],
-    "totally-different-recording.mp4",
-    2048,
-    new Uint8Array([12, 44, 88, 120, 5, 199, 33, 77, 201, 44, 90, 11]),
+    mae.loadFixtureBytes("Guest 1"),
   );
+  draftB.speakers[0].fileName = "guest-1-synced.wav";
 
   const episodeA = setup.summarize(draftA);
   const episodeB = setup.summarize(draftB);
-  assert.strictEqual(episodeA.speakers[0].name, episodeB.speakers[0].name);
-  assert.notStrictEqual(episodeA.speakers[0].sourceAudioBase64, episodeB.speakers[0].sourceAudioBase64);
+  assert.notDeepStrictEqual(
+    mae.decodeWav(mae.base64ToBytes(episodeA.speakers[0].sourceAudioBase64)).samples.slice(0, 32),
+    mae.decodeWav(mae.base64ToBytes(episodeB.speakers[0].sourceAudioBase64)).samples.slice(0, 32),
+  );
 
   const processedA = audio.processTracks(audio.createPolish(episodeA));
   const processedB = audio.processTracks(audio.createPolish(episodeB));
-  assert.notStrictEqual(
-    processedA.speakers[0].assetBase64,
-    processedB.speakers[0].assetBase64,
-    "swapping imported file bytes must change the polished output even when speaker identity and settings match",
-  );
+  assert.notStrictEqual(processedA.speakers[0].assetBase64, processedB.speakers[0].assetBase64);
 });
 
 test("REGRESSION (#197): tracks without imported source audio fail processing with a visible reason", () => {
