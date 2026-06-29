@@ -49,7 +49,7 @@ test("attachPlaceholderFile seeds a synced filename per speaker bucket", () => {
   assert.strictEqual(guest.fileName, "guest-2-synced.mp4");
 });
 
-test("upload draft with placeholder files validates for sandbox import", () => {
+test("upload draft with placeholder files stays blocked until real media is saved", () => {
   const draft = setup.createDraft();
   draft.episodeName = "Founders Unfiltered — Episode 1";
   draft.sourceMode = "upload";
@@ -59,7 +59,8 @@ test("upload draft with placeholder files validates for sandbox import", () => {
   });
 
   const result = setup.validateDraft(draft);
-  assert.strictEqual(result.ok, true, JSON.stringify(result.errors));
+  assert.strictEqual(result.ok, false);
+  assert.ok(result.messages.every((message) => /real media bytes/i.test(message)));
   const summary = setup.summarize(draft);
   assert.strictEqual(summary.sourceModeLabel, "Uploaded speaker files");
   assert.deepStrictEqual(
@@ -92,7 +93,8 @@ test("ACCEPTANCE: primary CTA lands on first-episode import with Riverside, file
   assert.ok(ui.includes("First episode import"));
   assert.ok(ui.includes("setup-first-episode-import"));
   assert.ok(ui.includes("file-placeholder-btn"));
-  assert.ok(ui.includes("Attach placeholder file"));
+  assert.ok(ui.includes("Add placeholder label"));
+  assert.ok(ui.includes("Choose a real audio or video file to continue"));
   assert.ok(ui.includes("f-riversideLink"));
   assert.ok(ui.includes("renderEpisodeImportRecap"));
   assert.ok(ui.includes("episode-import-handoff"));

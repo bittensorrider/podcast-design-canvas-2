@@ -189,9 +189,17 @@
     }
 
     return lines.sort((a, b) => {
+      // Parse "M:SS" and hour-plus "H:MM:SS" alike so hour-plus moments keep their place
+      // in the review order rather than collapsing to minutes:seconds (#266).
       const parse = (value) => {
-        const parts = String(value || "0:0").split(":");
-        return (Number(parts[0]) || 0) * 60 + (Number(parts[1]) || 0);
+        const parts = String(value || "0").split(":").map((part) => Number(part) || 0);
+        if (parts.length >= 3) {
+          return parts[0] * 3600 + parts[1] * 60 + parts[2];
+        }
+        if (parts.length === 2) {
+          return parts[0] * 60 + parts[1];
+        }
+        return parts[0];
       };
       return parse(a.time) - parse(b.time);
     });

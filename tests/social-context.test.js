@@ -37,6 +37,15 @@ function draftWithSocial() {
     }),
     Object.assign(setup.createSpeaker("Guest 2"), { name: "Marco Vidal", fileName: "marco.mp4" }),
   ];
+  draft.speakers.forEach((speaker, index) => {
+    setup.attachSourceMediaAsset(speaker, {
+      assetId: `social-context-media-${index + 1}`,
+      fileName: speaker.fileName,
+      fileSize: 4096,
+      mimeType: "video/mp4",
+      storage: "indexedDB",
+    });
+  });
   return draft;
 }
 
@@ -191,7 +200,7 @@ test("ACCEPTANCE: social links → approve context → moments and export reflec
 
   const selection = style.createSelection();
   const exportCtx = {
-    audioPolish: audio.summarizePolish(audio.createPolish(episode)),
+    audioPolish: audio.applyPolishForEpisode(episode).applied,
     appliedStyle: style.summarizeStyle(selection, episode.speakerCount),
     templateName: "Founders Unfiltered",
     momentsSummary: moments.summarizeBoard(board),

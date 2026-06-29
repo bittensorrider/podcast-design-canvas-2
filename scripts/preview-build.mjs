@@ -9,9 +9,9 @@ const required = [
   "index.html",
   "app/styles.css",
   "app/episode-setup.js",
-  "app/media-audio-extract.js",
   "app/episode-style.js",
   "app/style-preview.js",
+  "app/sample-recordings.js",
   "app/audio-polish.js",
   "app/canvas-layers.js",
   "app/canvas-editor.js",
@@ -29,9 +29,6 @@ const required = [
   "app/show-identity.js",
   "app/show-onboarding.js",
   "app/episode-flow.js",
-  "fixtures/imported-tracks/host-synced.wav",
-  "fixtures/imported-tracks/guest-1-synced.wav",
-  "fixtures/imported-tracks/guest-2-synced.wav",
   "app/episode-setup.ui.js",
 ];
 
@@ -50,9 +47,9 @@ for (const file of required) {
 // Parse-check every shipped script.
 for (const file of [
   "app/episode-setup.js",
-  "app/media-audio-extract.js",
   "app/episode-style.js",
   "app/style-preview.js",
+  "app/sample-recordings.js",
   "app/audio-polish.js",
   "app/canvas-layers.js",
   "app/canvas-editor.js",
@@ -87,9 +84,9 @@ if (existsSync("index.html")) {
   for (const ref of [
     "app/styles.css",
     "app/episode-setup.js",
-    "app/media-audio-extract.js",
     "app/episode-style.js",
-  "app/style-preview.js",
+    "app/style-preview.js",
+    "app/sample-recordings.js",
     "app/audio-polish.js",
     "app/canvas-layers.js",
     "app/canvas-editor.js",

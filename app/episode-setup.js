@@ -64,94 +64,10 @@
       role: role || "",
       fileName: "",
       fileSize: 0,
-      fileBytesBase64: "",
-      sourceAudioBase64: "",
-      sourceAudioReady: false,
+      sourceMedia: null,
       trackLabel: "",
       social: emptySocial(),
     };
-  }
-
-  // ---- Imported source audio capture (#197) -----------------------------------
-  // Speaker tracks only count as imported once a real decoded PCM WAV is attached.
-  // Browser UI decodes uploaded media with Web Audio; sandbox flows load synced
-  // fixture WAV files from fixtures/imported-tracks/.
-
-  function mediaExtractApi() {
-    if (typeof module !== "undefined" && module.exports && typeof require === "function") {
-      try {
-        return require("./media-audio-extract.js");
-      } catch (err) {
-        return null;
-      }
-    }
-    const g = typeof window !== "undefined" ? window : globalThis;
-    return g.PdcMediaAudioExtract || null;
-  }
-
-  function attachDecodedSourceAudio(speaker, wavBytes) {
-    const next = speaker && typeof speaker === "object" ? speaker : createSpeaker("Host");
-    const MAE = mediaExtractApi();
-    const bytes = wavBytes instanceof Uint8Array ? wavBytes : new Uint8Array(wavBytes || []);
-    if (!MAE || !MAE.isValidWav(bytes)) {
-      next.sourceAudioBase64 = "";
-      next.sourceAudioReady = false;
-      return next;
-    }
-    next.sourceAudioBase64 = MAE.bytesToBase64(bytes);
-    next.sourceAudioReady = true;
-    next.fileBytesBase64 = "";
-    return next;
-  }
-
-  function loadFixtureSourceAudioForRole(speaker) {
-    const next = speaker && typeof speaker === "object" ? speaker : createSpeaker("Host");
-    const MAE = mediaExtractApi();
-    if (!MAE) {
-      return next;
-    }
-    const bytes = MAE.loadFixtureBytes(next.role);
-    if (!bytes) {
-      return next;
-    }
-    return attachDecodedSourceAudio(next, bytes);
-  }
-
-  function speakerHasDecodedSourceAudio(speaker) {
-    const sp = speaker && typeof speaker === "object" ? speaker : {};
-    const MAE = mediaExtractApi();
-    if (!trim(sp.sourceAudioBase64) || !MAE) {
-      return false;
-    }
-    return MAE.isValidWav(MAE.base64ToBytes(sp.sourceAudioBase64));
-  }
-
-  function enrichDraftSourceAudio(draft) {
-    const data = draft && typeof draft === "object" ? draft : createDraft();
-    const speakers = Array.isArray(data.speakers) ? data.speakers : [];
-    speakers.forEach((raw) => {
-      const speaker = raw && typeof raw === "object" ? raw : createSpeaker("Host");
-      if (!speakerHasDecodedSourceAudio(speaker)) {
-        loadFixtureSourceAudioForRole(speaker);
-      }
-    });
-    return data;
-  }
-
-  function allSpeakersHaveDecodedSourceAudio(draft) {
-    const data = draft && typeof draft === "object" ? draft : {};
-    const speakers = Array.isArray(data.speakers) ? data.speakers : [];
-    return speakers.length > 0 && speakers.every((speaker) => speakerHasDecodedSourceAudio(speaker));
-  }
-
-  function attachUploadedFileMeta(speaker, fileName, fileSize) {
-    const next = speaker && typeof speaker === "object" ? speaker : createSpeaker("Host");
-    next.fileName = trim(fileName);
-    next.fileSize = fileSize || 0;
-    next.fileBytesBase64 = "";
-    next.sourceAudioBase64 = "";
-    next.sourceAudioReady = false;
-    return next;
   }
 
   function speakerBucketCueClass(role) {
@@ -234,7 +150,70 @@
     const next = speaker && typeof speaker === "object" ? speaker : createSpeaker("Host");
     next.fileName = placeholderFileName(next.role);
     next.fileSize = 1280000;
-    return loadFixtureSourceAudioForRole(next);
+    next.sourceMedia = null;
+    return next;
+  }
+
+  function sourceMediaId(fileName, role) {
+    const source = trim(fileName) || trim(role) || "speaker-source";
+    const slug = source.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "speaker-source";
+    return `${slug}-${Date.now()}`;
+  }
+
+  function normalizeSourceMediaAsset(asset, speaker) {
+    const data = asset && typeof asset === "object" ? asset : {};
+    const fileName = trim(data.fileName || data.name || (speaker && speaker.fileName));
+    const byteLength = Math.max(
+      0,
+      Number(data.byteLength || data.fileSize || data.size || (speaker && speaker.fileSize) || 0) || 0,
+    );
+    const assetId = trim(data.assetId || data.id);
+    const dataUrl = trim(data.dataUrl);
+    if (!fileName || byteLength <= 0 || (!assetId && !dataUrl)) {
+      return null;
+    }
+    return {
+      assetId: assetId || sourceMediaId(fileName, speaker && speaker.role),
+      fileName,
+      mimeType: trim(data.mimeType || data.type) || "application/octet-stream",
+      byteLength,
+      storage: trim(data.storage) || (dataUrl ? "inline" : "browser"),
+      dataUrl,
+      storedAt: Number(data.storedAt || data.capturedAt) || Date.now(),
+    };
+  }
+
+  function attachSourceMediaAsset(speaker, asset) {
+    const next = speaker && typeof speaker === "object" ? speaker : createSpeaker("Host");
+    const sourceMedia = normalizeSourceMediaAsset(asset, next);
+    if (!sourceMedia) {
+      next.sourceMedia = null;
+      return next;
+    }
+    next.fileName = sourceMedia.fileName;
+    next.fileSize = sourceMedia.byteLength;
+    next.sourceMedia = sourceMedia;
+    return next;
+  }
+
+  function hasSourceMedia(speaker) {
+    return Boolean(normalizeSourceMediaAsset(speaker && speaker.sourceMedia, speaker));
+  }
+
+  function summarizeSourceMedia(speaker) {
+    const sourceMedia = normalizeSourceMediaAsset(speaker && speaker.sourceMedia, speaker);
+    if (!sourceMedia) {
+      return null;
+    }
+    return {
+      assetId: sourceMedia.assetId,
+      fileName: sourceMedia.fileName,
+      mimeType: sourceMedia.mimeType,
+      byteLength: sourceMedia.byteLength,
+      storage: sourceMedia.storage,
+      dataUrl: sourceMedia.dataUrl,
+      storedAt: sourceMedia.storedAt,
+    };
   }
 
   // A fresh episode draft. Seeded with Host / Guest 1 / Guest 2 so the creator starts
@@ -309,8 +288,12 @@
         seenRoles.add(role);
       }
 
-      if (mode === "upload" && !trim(speaker.fileName)) {
-        fail(`speaker:${index}:source`, `Choose a video file for ${who}.`);
+      if (mode === "upload") {
+        if (!trim(speaker.fileName)) {
+          fail(`speaker:${index}:source`, `Choose an audio or video file for ${who}.`);
+        } else if (!hasSourceMedia(speaker)) {
+          fail(`speaker:${index}:source`, `Save the real media bytes for ${who} before continuing.`);
+        }
       }
 
       const social = (speaker && speaker.social) || {};
@@ -337,7 +320,7 @@
   // Derive exactly what the workspace screen displays. Everything here is computed from
   // the draft — no fabricated state — so the summary always reflects what was entered.
   function summarize(draft) {
-    const data = enrichDraftSourceAudio(draft && typeof draft === "object" ? draft : {});
+    const data = draft && typeof draft === "object" ? draft : {};
     const mode = normalizeMode(data.sourceMode);
     const speakers = Array.isArray(data.speakers) ? data.speakers : [];
 
@@ -348,13 +331,14 @@
         role: trim(speaker.role),
         name: trim(speaker.name),
         sourceLabel: sourceLabel(mode, speaker),
-        sourceAudioBase64: trim(speaker.sourceAudioBase64),
-        sourceAudioReady: Boolean(speaker.sourceAudioReady),
+        sourceMedia: mode === "upload" ? summarizeSourceMedia(speaker) : null,
+        hasSourceMedia: mode === "upload" ? hasSourceMedia(speaker) : false,
         social,
       };
     });
 
     const socialLinkCount = summarizedSpeakers.reduce((total, sp) => total + sp.social.length, 0);
+    const sourceMediaCount = summarizedSpeakers.reduce((total, sp) => total + (sp.hasSourceMedia ? 1 : 0), 0);
 
     return {
       episodeName: trim(data.episodeName),
@@ -363,6 +347,7 @@
       riversideLink: mode === "riverside" ? trim(data.riversideLink) : "",
       speakerCount: summarizedSpeakers.length,
       socialLinkCount,
+      sourceMediaCount,
       roles: summarizedSpeakers.map((sp) => sp.role).filter(Boolean),
       speakers: summarizedSpeakers,
     };
@@ -441,7 +426,7 @@
       return isLikelyUrl(trim(data.riversideLink));
     }
     const speakers = Array.isArray(data.speakers) ? data.speakers : [];
-    return speakers.length > 0 && speakers.every((speaker) => trim(speaker.fileName));
+    return speakers.length > 0 && speakers.every((speaker) => trim(speaker.fileName) && hasSourceMedia(speaker));
   }
 
   function applyImportContinueDefaults(draft, options) {
@@ -538,6 +523,7 @@
       speakerRoles: (data.speakers || []).map((speaker) => trim(speaker.role)).filter(Boolean),
       speakerIdentities: handoff.speakers.map((speaker) => speaker.identityLine),
       sourceDetail: handoff.sourceDetail,
+      sourceMediaCount: Number(data.sourceMediaCount) || 0,
       presetSummary: trim(opts.presetSummary) || "",
     };
   }
@@ -561,6 +547,142 @@
     return true;
   }
 
+  // ---- Riverside track discovery (#225) --------------------------------------
+  // When a creator pastes a Riverside recording link, surface the speaker tracks the
+  // session contains so buckets can be assigned without manual guesswork. There is no
+  // Riverside backend in the sandbox, so a valid riverside.fm link yields a deterministic
+  // session preview (stable for a given link) that simulates what a real import returns.
+
+  function riversideHost(url) {
+    const text = trim(url);
+    if (!/^https?:\/\//i.test(text)) {
+      return "";
+    }
+    return text.replace(/^https?:\/\//i, "").split(/[/?#]/)[0].toLowerCase();
+  }
+
+  function isRiversideUrl(url) {
+    if (!isLikelyUrl(url)) {
+      return false;
+    }
+    const host = riversideHost(url);
+    return host === "riverside.fm" || host.endsWith(".riverside.fm");
+  }
+
+  function hashString(value) {
+    // FNV-1a 32-bit — used only to make the simulated session preview deterministic.
+    let h = 0x811c9dc5;
+    const text = String(value);
+    for (let i = 0; i < text.length; i += 1) {
+      h ^= text.charCodeAt(i);
+      h = Math.imul(h, 0x01000193);
+    }
+    return h >>> 0;
+  }
+
+  function formatTrackDuration(totalSeconds) {
+    const secs = Math.max(0, Math.round(Number(totalSeconds) || 0));
+    const hours = Math.floor(secs / 3600);
+    const minutes = Math.floor((secs % 3600) / 60);
+    const seconds = secs % 60;
+    const mm = hours ? String(minutes).padStart(2, "0") : String(minutes);
+    const ss = String(seconds).padStart(2, "0");
+    return hours ? `${hours}:${mm}:${ss}` : `${mm}:${ss}`;
+  }
+
+  // The fixed, friendly track preview for the built-in sandbox demo link.
+  function sandboxDemoTracks() {
+    return [
+      { speakerLabel: "Studio mic 1", durationSeconds: 3725 },
+      { speakerLabel: "Studio mic 2", durationSeconds: 3718 },
+      { speakerLabel: "Studio mic 3", durationSeconds: 3702 },
+    ];
+  }
+
+  // Discover the speaker tracks a Riverside session contains. Deterministic for a given
+  // link. Returns { ok:false, error } for empty, malformed, or non-Riverside URLs (never
+  // throws, never mutates the draft) so the setup form can show a clear inline error.
+  function discoverRiversideTracks(url) {
+    const link = trim(url);
+    if (!link) {
+      return { ok: false, error: "Paste your Riverside recording link first." };
+    }
+    if (!isLikelyUrl(link)) {
+      return { ok: false, error: "That doesn't look like a full link — paste the Riverside URL starting with http." };
+    }
+    if (!isRiversideUrl(link)) {
+      return { ok: false, error: "That link isn't a Riverside recording — paste a riverside.fm session link." };
+    }
+
+    const seed = hashString(link);
+    const isDemo = isSandboxDemoRiversideLink(link);
+    let raw;
+    if (isDemo) {
+      raw = sandboxDemoTracks();
+    } else {
+      const count = 2 + (seed % 2); // 2 or 3 tracks
+      const baseDuration = 1800 + (seed % 2400); // 30–70 min base, long-form
+      raw = [];
+      for (let i = 0; i < count; i += 1) {
+        const jitter = (hashString(link + ":" + i) % 120) - 60; // +/- 60s per track
+        raw.push({
+          speakerLabel: `Studio mic ${i + 1}`,
+          durationSeconds: Math.max(60, baseDuration + jitter),
+        });
+      }
+    }
+
+    const tracks = raw.map((track, index) => ({
+      id: `track-${index + 1}`,
+      trackNumber: index + 1,
+      speakerLabel: track.speakerLabel,
+      suggestedRole: defaultSpeakerRoleForIndex(index),
+      durationSeconds: track.durationSeconds,
+      durationLabel: formatTrackDuration(track.durationSeconds),
+      syncStatus: "In sync",
+    }));
+
+    return {
+      ok: true,
+      sessionId: seed.toString(16).padStart(8, "0"),
+      sessionLabel: isDemo ? "Podcast Canvas demo session" : "Riverside session",
+      isDemo: isDemo,
+      trackCount: tracks.length,
+      tracks: tracks,
+    };
+  }
+
+  // Map discovered tracks onto speaker buckets in order (Host, Guest 1, Guest 2…),
+  // resizing the speaker list to match and recording each track's channel label while
+  // keeping any names the creator already entered. Returns the updated draft.
+  function applyDiscoveryToBuckets(draft, discovery) {
+    const data = draft && typeof draft === "object" ? draft : createDraft();
+    if (!discovery || discovery.ok !== true || !Array.isArray(discovery.tracks) || !discovery.tracks.length) {
+      return data;
+    }
+    const existing = Array.isArray(data.speakers) ? data.speakers : [];
+    data.sourceMode = "riverside";
+    data.speakers = discovery.tracks.map((track, index) => {
+      const prior = existing[index] && typeof existing[index] === "object"
+        ? existing[index]
+        : createSpeaker("Host");
+      prior.trackLabel = track.speakerLabel || prior.trackLabel || `Track ${index + 1}`;
+      return prior;
+    });
+    normalizeDefaultSpeakerRoles(data.speakers);
+    return data;
+  }
+
+  // A creator-facing recap of a successful discovery for the setup summary/banner.
+  function summarizeDiscovery(discovery) {
+    if (!discovery || discovery.ok !== true) {
+      return "";
+    }
+    const count = discovery.trackCount || (discovery.tracks ? discovery.tracks.length : 0);
+    const roles = (discovery.tracks || []).map((track) => track.suggestedRole).filter(Boolean).join(", ");
+    return `${count} track${count === 1 ? "" : "s"} discovered · ${roles} · all in sync`;
+  }
+
   const api = {
     SPEAKER_BUCKETS,
     SOURCE_MODES,
@@ -576,12 +698,9 @@
     speakerBucketCueClass,
     placeholderFileName,
     attachPlaceholderFile,
-    attachUploadedFileMeta,
-    attachDecodedSourceAudio,
-    loadFixtureSourceAudioForRole,
-    speakerHasDecodedSourceAudio,
-    allSpeakersHaveDecodedSourceAudio,
-    enrichDraftSourceAudio,
+    attachSourceMediaAsset,
+    hasSourceMedia,
+    summarizeSourceMedia,
     defaultSpeakerRoleForIndex,
     normalizeDefaultSpeakerRoles,
     usedSpeakerRoles,
@@ -592,6 +711,11 @@
     defaultImportShowName,
     sandboxDemoRiversideLink,
     isSandboxDemoRiversideLink,
+    isRiversideUrl,
+    formatTrackDuration,
+    discoverRiversideTracks,
+    applyDiscoveryToBuckets,
+    summarizeDiscovery,
     handoffIdentityLine,
     handoffSourceDetail,
     applySandboxHandoffSource,

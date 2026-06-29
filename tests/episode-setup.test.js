@@ -35,11 +35,29 @@ function completeUploadDraft() {
   draft.episodeName = "Episode 12 — Building in Public";
   draft.sourceMode = "upload";
   draft.speakers[0].name = "Avery Stone";
-  draft.speakers[0].fileName = "avery-host.mp4";
+  setup.attachSourceMediaAsset(draft.speakers[0], {
+    assetId: "asset-avery-host",
+    fileName: "avery-host.mp4",
+    fileSize: 4096,
+    mimeType: "video/mp4",
+    storage: "indexedDB",
+  });
   draft.speakers[1].name = "Jordan Lee";
-  draft.speakers[1].fileName = "jordan-guest1.mp4";
+  setup.attachSourceMediaAsset(draft.speakers[1], {
+    assetId: "asset-jordan-guest1",
+    fileName: "jordan-guest1.mp4",
+    fileSize: 4096,
+    mimeType: "video/mp4",
+    storage: "indexedDB",
+  });
   draft.speakers[2].name = "Priya Raman";
-  draft.speakers[2].fileName = "priya-guest2.mp4";
+  setup.attachSourceMediaAsset(draft.speakers[2], {
+    assetId: "asset-priya-guest2",
+    fileName: "priya-guest2.mp4",
+    fileSize: 4096,
+    mimeType: "video/mp4",
+    storage: "indexedDB",
+  });
   return draft;
 }
 
@@ -74,12 +92,21 @@ test("riverside mode rejects a link that is not a URL", () => {
   assert.ok(/doesn't look right/i.test(result.errors.riversideLink || ""));
 });
 
-test("upload mode requires a video file for each speaker", () => {
+test("upload mode requires a media file for each speaker", () => {
   const draft = completeUploadDraft();
   draft.speakers[1].fileName = "";
+  draft.speakers[1].sourceMedia = null;
   const result = setup.validateDraft(draft);
   assert.ok(result.errors["speaker:1:source"], "expected a missing-file error on speaker 1");
-  assert.ok(/video file/i.test(result.errors["speaker:1:source"]));
+  assert.ok(/audio or video file/i.test(result.errors["speaker:1:source"]));
+});
+
+test("upload mode rejects filename-only media without saved bytes", () => {
+  const draft = completeUploadDraft();
+  draft.speakers[1].sourceMedia = null;
+  const result = setup.validateDraft(draft);
+  assert.strictEqual(result.ok, false);
+  assert.ok(/real media bytes/i.test(result.errors["speaker:1:source"]));
 });
 
 test("every speaker needs a name", () => {
@@ -139,6 +166,50 @@ test("upload summary shows the chosen file name per speaker", () => {
   assert.strictEqual(summary.riversideLink, ""); // link not surfaced in upload mode
 });
 
+test("upload summary preserves durable source media assets for imported files", () => {
+  const draft = setup.createDraft();
+  draft.episodeName = "Episode 12 — Building in Public";
+  draft.sourceMode = "upload";
+  draft.speakers[0].name = "Avery Stone";
+  draft.speakers[1].name = "Jordan Lee";
+  draft.speakers[1].fileName = "jordan-guest1.mp4";
+  draft.speakers[2].name = "Priya Raman";
+  draft.speakers[2].fileName = "priya-guest2.mp4";
+  setup.attachSourceMediaAsset(draft.speakers[0], {
+    assetId: "asset-host-wav",
+    fileName: "avery-host.wav",
+    fileSize: 4096,
+    mimeType: "audio/wav",
+    storage: "indexedDB",
+    storedAt: 1760000000000,
+  });
+
+  const restoredDraft = JSON.parse(JSON.stringify(draft));
+  const summary = setup.summarize(restoredDraft);
+  assert.strictEqual(summary.sourceMediaCount, 1);
+  assert.strictEqual(summary.speakers[0].hasSourceMedia, true);
+  assert.deepStrictEqual(summary.speakers[0].sourceMedia, {
+    assetId: "asset-host-wav",
+    fileName: "avery-host.wav",
+    mimeType: "audio/wav",
+    byteLength: 4096,
+    storage: "indexedDB",
+    dataUrl: "",
+    storedAt: 1760000000000,
+  });
+});
+
+test("placeholder upload files do not masquerade as source media", () => {
+  const speaker = setup.createSpeaker("Host");
+  setup.attachPlaceholderFile(speaker);
+  assert.strictEqual(setup.hasSourceMedia(speaker), false);
+  assert.strictEqual(setup.summarizeSourceMedia(speaker), null);
+  const draft = completeUploadDraft();
+  draft.speakers[0] = speaker;
+  speaker.name = "Avery Stone";
+  assert.strictEqual(setup.validateDraft(draft).ok, false);
+});
+
 // End-to-end acceptance walkthrough: the documented runnable check for issue #1.
 test("ACCEPTANCE: complete a new episode setup with 3 sources end to end", () => {
   const draft = setup.createDraft();
@@ -155,7 +226,13 @@ test("ACCEPTANCE: complete a new episode setup with 3 sources end to end", () =>
   draft.speakers = people.map((p) => {
     const speaker = setup.createSpeaker(p.role);
     speaker.name = p.name;
-    speaker.fileName = p.fileName;
+    setup.attachSourceMediaAsset(speaker, {
+      assetId: `asset-${p.role.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+      fileName: p.fileName,
+      fileSize: 4096,
+      mimeType: "video/mp4",
+      storage: "indexedDB",
+    });
     return speaker;
   });
   // 4. Add a social link for one speaker.

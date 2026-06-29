@@ -25,6 +25,30 @@
     COMPLETE: "complete",
   };
 
+  function setupApi() {
+    if (typeof module !== "undefined" && module.exports && typeof require === "function") {
+      return require("./episode-setup.js");
+    }
+    const g = typeof window !== "undefined" ? window : globalThis;
+    return g.PdcEpisodeSetup;
+  }
+
+  function audioPolishApi() {
+    if (typeof module !== "undefined" && module.exports && typeof require === "function") {
+      return require("./audio-polish.js");
+    }
+    const g = typeof window !== "undefined" ? window : globalThis;
+    return g.PdcAudioPolish;
+  }
+
+  function isAudioPolishApplied(context) {
+    const AP = audioPolishApi();
+    if (AP) {
+      return AP.isPolishReady(context && context.audioPolish);
+    }
+    return Boolean(context && context.audioPolish && context.audioPolish.presetName);
+  }
+
   function stage(id, label, status, summary, actionLabel, actionTarget) {
     return {
       id: id,
@@ -34,14 +58,6 @@
       actionLabel: actionLabel,
       actionTarget: actionTarget || ACTION_TARGETS[id] || id,
     };
-  }
-
-  function setupApi() {
-    if (typeof module !== "undefined" && module.exports && typeof require === "function") {
-      return require("./episode-setup.js");
-    }
-    const g = typeof window !== "undefined" ? window : globalThis;
-    return g.PdcEpisodeSetup;
   }
 
   function buildStages(episodeSummary, ctx) {
@@ -103,12 +119,7 @@
     ));
 
     // Audio -------------------------------------------------------------------
-    // Complete requires every speaker track to actually be polished, not just a
-    // preset having been picked — choosing a preset alone used to be enough,
-    // which made this stage a no-op (#197).
-    const audioPreset = context.audioPolish && context.audioPolish.presetName;
-    const audioApplied = Boolean(audioPreset && context.audioPolish.allTracksProcessed);
-    const audioPartial = Boolean(audioPreset && !context.audioPolish.allTracksProcessed);
+    const audioApplied = isAudioPolishApplied(context);
     stages.push(stage(
       "audio",
       "Audio polish",
@@ -116,10 +127,8 @@
         ? STATUS.COMPLETE
         : setupComplete ? STATUS.ACTIVE : STATUS.PENDING,
       audioApplied
-        ? `${context.audioPolish.presetName} — ${context.audioPolish.treatmentLine || "treatment applied"} · ${context.audioPolish.processedTrackCount || 0}/${context.audioPolish.tracksTotal || 0} tracks polished`
-        : audioPartial
-          ? `${context.audioPolish.presetName} chosen — apply it so every speaker track is polished.`
-          : "Choose a sound quality preset for every speaker track.",
+        ? `${context.audioPolish.presetName} — ${context.audioPolish.polishedTrackCount || 0} polished track${(context.audioPolish.polishedTrackCount || 0) === 1 ? "" : "s"} · ${context.audioPolish.treatmentLine || "treatment applied"}`
+        : "Choose a sound quality preset for every speaker track.",
       audioApplied ? "Change audio" : "Polish audio",
       ACTION_TARGETS.audio,
     ));

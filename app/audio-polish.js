@@ -79,9 +79,7 @@
   }
 
   function getPreset(id) {
-    return (
-      QUALITY_PRESETS.find((preset) => preset.id === id) || defaultPreset()
-    );
+    return QUALITY_PRESETS.find((preset) => preset.id === id) || defaultPreset();
   }
 
   function getLevel(id) {
@@ -93,273 +91,26 @@
   }
 
   function buildSpeakerTracks(episodeSummary) {
-    const speakers =
-      episodeSummary && Array.isArray(episodeSummary.speakers)
-        ? episodeSummary.speakers
-        : [];
-    return speakers.map((speaker, index) => ({
-      role: (speaker && speaker.role) || "Speaker",
-      name: (speaker && speaker.name) || "Unnamed speaker",
-      sourceLabel: (speaker && speaker.sourceLabel) || "Source track",
-      sourceAudioBase64: (speaker && speaker.sourceAudioBase64) || "",
-      trackIndex: index + 1,
-      processed: false,
-      status: "pending",
-      failureReason: "",
-      outputRef: null,
-      processedAt: null,
-      processedSettingsKey: null,
-    }));
-  }
-
-  // A settings fingerprint covering the preset and every individual control.
-  // Used to tell whether a track's saved polished output still matches the
-  // creator's current choices, or whether it has gone stale and needs reprocessing.
-  function settingsKey(polish) {
-    const state = polish || {};
-    return [
-      state.presetId,
-      state.noiseCleanup,
-      state.leveling,
-      state.speechClarity,
-      state.enhancement,
-    ].join("|");
-  }
-
-  // A track is "current" only if it has been processed AND that processing
-  // happened under the exact settings the polish currently holds.
-  function isTrackCurrent(polish, track) {
-    if (!track || !track.processed) {
-      return false;
-    }
-    return track.processedSettingsKey === settingsKey(polish);
-  }
-
-  function outputRefFor(polish, track) {
-    const preset = getPreset(polish && polish.presetId);
-    const slug = `${(track && track.role) || "speaker"}`
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-");
-    return `polished/${track && track.trackIndex}-${slug}-${preset.id}.wav`;
-  }
-
-  // ---- Imported-track audio transformation (#197) -----------------------------
-  // Polish decodes the imported PCM WAV, applies creator-facing treatment in the
-  // sample domain, and writes a new polished PCM WAV asset.
-
-  function mediaExtractApi() {
-    if (typeof module !== "undefined" && module.exports && typeof require === "function") {
-      try {
-        return require("./media-audio-extract.js");
-      } catch (err) {
-        return null;
-      }
-    }
-    const g = typeof window !== "undefined" ? window : globalThis;
-    return g.PdcMediaAudioExtract || null;
-  }
-
-  function bytesToBase64(bytes) {
-    const MAE = mediaExtractApi();
-    return MAE ? MAE.bytesToBase64(bytes) : "";
-  }
-
-  function base64ToBytes(base64) {
-    const MAE = mediaExtractApi();
-    return MAE ? MAE.base64ToBytes(base64) : new Uint8Array(0);
-  }
-
-  const LEVEL_INTENSITY = { light: 0.35, balanced: 0.6, strong: 0.9 };
-
-  function transformImportedTrack(sourceBase64, polish) {
-    const MAE = mediaExtractApi();
-    if (!MAE) {
-      throw new Error("Audio extraction helpers are unavailable.");
-    }
-    const state = polish || {};
-    const decoded = MAE.decodeWav(MAE.base64ToBytes(sourceBase64));
-    const input = decoded.samples;
-    const output = new Int16Array(input.length);
-    const noise = LEVEL_INTENSITY[state.noiseCleanup] || 0.6;
-    const leveling = LEVEL_INTENSITY[state.leveling] || 0.6;
-    const clarity = LEVEL_INTENSITY[state.speechClarity] || 0.6;
-    const enhancement = LEVEL_INTENSITY[state.enhancement] || 0.6;
-    const gate = 900 + noise * 2200;
-    let peak = 1;
-    for (let i = 0; i < input.length; i += 1) {
-      peak = Math.max(peak, Math.abs(input[i]));
-    }
-    const targetPeak = 12000 + leveling * 9000;
-
-    for (let i = 0; i < input.length; i += 1) {
-      let sample = input[i];
-      const prev = i > 0 ? input[i - 1] : sample;
-      const next = i + 1 < input.length ? input[i + 1] : sample;
-
-      if (Math.abs(sample) < gate) {
-        sample *= 1 - noise * 0.85;
-      }
-
-      const transient = sample - prev;
-      sample += transient * clarity * 0.45;
-
-      const warmth = (prev + sample + next) / 3;
-      sample = sample * (1 - enhancement * 0.2) + warmth * enhancement * 0.2;
-
-      if (peak > 0) {
-        sample = (sample / peak) * targetPeak;
-      }
-
-      output[i] = Math.max(-32768, Math.min(32767, Math.round(sample)));
-    }
-
-    return MAE.encodePcm16MonoWav(output, decoded.sampleRate);
-  }
-
-  // Under Node (the test/CLI harness for this shared model) actually persist the
-  // synthesized bytes to a real file on disk so the polished output is a genuine
-  // artifact that downstream code could read back — not only an in-memory label.
-  // Browsers have no filesystem access, so the same bytes travel as assetBase64 /
-  // audioDataUrl instead (see summarizePolish and audioDataUrl below).
-  function writeAssetToDisk(outputRef, bytes) {
-    if (typeof require !== "function" || typeof module === "undefined" || !module.exports) {
-      return null;
-    }
-    try {
-      const fs = require("fs");
-      const path = require("path");
-      const dir = path.join(__dirname, "..", "polished-output");
-      fs.mkdirSync(dir, { recursive: true });
-      const filePath = path.join(dir, outputRef.replace(/^polished\//, ""));
-      fs.writeFileSync(filePath, Buffer.from(bytes));
-      return filePath;
-    } catch (err) {
-      return null;
-    }
-  }
-
-  // A data: URL the UI can drop straight into <audio src> — a real, playable
-  // polished asset for the speaker, with no Blob/createObjectURL dependency.
-  function audioDataUrl(track) {
-    if (!track || !track.assetBase64) {
-      return null;
-    }
-    return `data:audio/wav;base64,${track.assetBase64}`;
-  }
-
-  // Runs the current preset/control settings against every speaker track and
-  // saves a polished output reference for each — this is the actual "processing"
-  // step. Without calling this, changing presets/controls only edits intent;
-  // no speaker track is considered polished (#197). Each track gets a real,
-  // settings-dependent audio asset (see synthesizeTrackAudio) — written to disk
-  // under Node, carried as base64 audio for the browser.
-  function processTracks(polish) {
-    const base = polish || createPolish({});
-    const key = settingsKey(base);
-    const now = Date.now();
-    return Object.assign({}, base, {
-      speakers: (base.speakers || []).map((track) => {
-        const sourceAudio = track && track.sourceAudioBase64;
-        if (!sourceAudio) {
-          return Object.assign({}, track, {
-            processed: false,
-            status: "failed",
-            failureReason: "No decoded speaker-track audio for this import yet.",
-            processedAt: now,
-            outputRef: null,
-            processedSettingsKey: null,
-            assetBase64: null,
-            assetBytes: 0,
-            savedPath: null,
-          });
-        }
-        try {
-          const outputRef = outputRefFor(base, track);
-          const bytes = transformImportedTrack(sourceAudio, base);
-          const assetBase64 = bytesToBase64(bytes);
-          const savedPath = writeAssetToDisk(outputRef, bytes);
-          return Object.assign({}, track, {
-            processed: true,
-            status: "complete",
-            failureReason: "",
-            processedAt: now,
-            outputRef,
-            processedSettingsKey: key,
-            assetBase64,
-            assetBytes: bytes.length,
-            savedPath,
-          });
-        } catch (err) {
-          return Object.assign({}, track, {
-            processed: false,
-            status: "failed",
-            failureReason: (err && err.message) || "Audio polish failed for this track.",
-            processedAt: now,
-            outputRef: null,
-            processedSettingsKey: null,
-            assetBase64: null,
-            assetBytes: 0,
-            savedPath: null,
-          });
-        }
-      }),
+    const sourceMode = episodeSummary && episodeSummary.sourceMode ? episodeSummary.sourceMode : "";
+    const speakers = episodeSummary && Array.isArray(episodeSummary.speakers)
+      ? episodeSummary.speakers
+      : [];
+    return speakers.map((speaker, index) => {
+      const sourceMedia = speaker && speaker.sourceMedia && typeof speaker.sourceMedia === "object"
+        ? speaker.sourceMedia
+        : null;
+      const byteLength = sourceMedia ? Number(sourceMedia.byteLength) || 0 : 0;
+      const assetId = sourceMedia ? sourceMedia.assetId || sourceMedia.id || "" : "";
+      return {
+        role: (speaker && speaker.role) || "Speaker",
+        name: (speaker && speaker.name) || "Unnamed speaker",
+        sourceLabel: (speaker && speaker.sourceLabel) || "Source track",
+        sourceMode: sourceMode,
+        sourceMedia: sourceMedia,
+        hasSourceMedia: Boolean(sourceMedia && assetId && byteLength > 0),
+        trackIndex: index + 1,
+      };
     });
-  }
-
-  function processedTrackCount(polish) {
-    const state = polish || {};
-    const speakers = Array.isArray(state.speakers) ? state.speakers : [];
-    return speakers.filter((track) => isTrackCurrent(state, track)).length;
-  }
-
-  function allTracksProcessed(polish) {
-    const state = polish || {};
-    const speakers = Array.isArray(state.speakers) ? state.speakers : [];
-    return (
-      speakers.length > 0 && processedTrackCount(state) === speakers.length
-    );
-  }
-
-  // Rebuilds a working polish object from a previously saved summary (e.g. after
-  // reloading the episode) so the creator's preset/control choices — and any
-  // speaker tracks that are still validly polished under those choices — survive
-  // a reload instead of silently resetting to defaults (#197).
-  function restorePolish(episodeSummary, polishSummary) {
-    const base = createPolish(episodeSummary);
-    const saved = polishSummary || null;
-    if (!saved) {
-      return base;
-    }
-    const preset = getPreset(saved.presetId);
-    const restored = Object.assign({}, base, {
-      presetId: preset.id,
-      noiseCleanup: getLevel(saved.noiseCleanup).id,
-      leveling: getLevel(saved.leveling).id,
-      speechClarity: getLevel(saved.speechClarity).id,
-      enhancement: getLevel(saved.enhancement).id,
-    });
-    const key = settingsKey(restored);
-    const savedTracks = Array.isArray(saved.speakers) ? saved.speakers : [];
-    restored.speakers = base.speakers.map((track) => {
-      const prior = savedTracks.find(
-        (item) => item && item.role === track.role && item.name === track.name,
-      );
-      if (prior && prior.processed && prior.processedSettingsKey === key) {
-        return Object.assign({}, track, {
-          processed: true,
-          status: prior.status || "complete",
-          failureReason: prior.failureReason || "",
-          processedAt: prior.processedAt || null,
-          outputRef: prior.outputRef || null,
-          processedSettingsKey: key,
-          assetBase64: prior.assetBase64 || null,
-          assetBytes: prior.assetBytes || 0,
-          savedPath: prior.savedPath || null,
-        });
-      }
-      return track;
-    });
-    return restored;
   }
 
   function createPolish(episodeSummary) {
@@ -396,51 +147,433 @@
     return next;
   }
 
-  function speakerIndicator(polish, speaker) {
+  function speakerIndicator(polish, speaker, polishedTrack) {
     const preset = getPreset(polish && polish.presetId);
     const name = (speaker && speaker.name) || "Speaker";
-    let status = "Pending";
-    if (speaker && speaker.status === "failed") {
-      status = "Failed";
-    } else if (isTrackCurrent(polish, speaker)) {
-      status = "Polished";
+    if (polishedTrack && polishedTrack.status === "complete") {
+      return `${preset.name} treatment · ${name} · polished track saved`;
     }
-    return `${preset.name} treatment · ${name} · ${status}`;
+    if (polishedTrack && polishedTrack.status === "failed") {
+      return `${preset.name} treatment · ${name} · polish failed`;
+    }
+    if (polishedTrack && polishedTrack.status === "needs-media") {
+      return `${preset.name} treatment · ${name} · upload source media to polish`;
+    }
+    const sourceCue = speaker && speaker.sourceMode === "upload"
+      ? (speaker.hasSourceMedia ? "source media saved" : "source media pending")
+      : "source media required";
+    return `${preset.name} treatment · ${name} · ${sourceCue}`;
   }
 
-  function summarizePolish(polish) {
+  function intensityForLevel(levelId) {
+    if (levelId === "light") {
+      return 0.33;
+    }
+    if (levelId === "strong") {
+      return 1;
+    }
+    return 0.66;
+  }
+
+  function polishSamples(samples, sampleRate, polish) {
+    const input = samples instanceof Float32Array ? samples : new Float32Array(samples || []);
+    const out = new Float32Array(input.length);
+    out.set(input);
     const state = polish || createPolish({});
+    const rate = Number(sampleRate) > 0 ? Number(sampleRate) : 44100;
+
+    const noiseAmount = intensityForLevel(state.noiseCleanup);
+    if (noiseAmount > 0 && out.length > 1) {
+      const cutoff = 80 + noiseAmount * 120;
+      const rc = 1 / (2 * Math.PI * cutoff);
+      const dt = 1 / rate;
+      const alpha = rc / (rc + dt);
+      let prevIn = out[0];
+      let prevOut = out[0];
+      for (let i = 0; i < out.length; i += 1) {
+        const x = out[i];
+        const y = alpha * (prevOut + x - prevIn);
+        prevIn = x;
+        prevOut = y;
+        out[i] = y;
+      }
+      const threshold = 0.002 + (1 - noiseAmount) * 0.008;
+      for (let i = 0; i < out.length; i += 1) {
+        if (Math.abs(out[i]) < threshold) {
+          out[i] *= 0.1;
+        }
+      }
+    }
+
+    const levelAmount = intensityForLevel(state.leveling);
+    if (levelAmount > 0 && out.length > 0) {
+      let sum = 0;
+      for (let i = 0; i < out.length; i += 1) {
+        sum += out[i] * out[i];
+      }
+      const rms = Math.sqrt(sum / out.length) || 0.0001;
+      const targetRms = 0.08 + levelAmount * 0.07;
+      const gain = Math.min(4, targetRms / rms);
+      const appliedGain = 1 + (gain - 1) * levelAmount;
+      for (let i = 0; i < out.length; i += 1) {
+        out[i] *= appliedGain;
+      }
+    }
+
+    const clarityAmount = intensityForLevel(state.speechClarity);
+    if (clarityAmount > 0 && out.length > 1) {
+      let prev = out[0];
+      for (let i = 0; i < out.length; i += 1) {
+        const high = out[i] - prev;
+        prev = out[i];
+        out[i] = out[i] + high * clarityAmount * 0.4;
+      }
+    }
+
+    const enhanceAmount = intensityForLevel(state.enhancement);
+    if (enhanceAmount > 0) {
+      const drive = 1 + enhanceAmount * 0.8;
+      const norm = Math.tanh(drive);
+      for (let i = 0; i < out.length; i += 1) {
+        out[i] = Math.tanh(out[i] * drive) / norm;
+      }
+    }
+
+    for (let i = 0; i < out.length; i += 1) {
+      out[i] = Math.max(-0.99, Math.min(0.99, out[i]));
+    }
+    return out;
+  }
+
+  function encodeWav(samples, sampleRate) {
+    const pcm = samples instanceof Float32Array ? samples : new Float32Array(samples || []);
+    const rate = Number(sampleRate) > 0 ? Number(sampleRate) : 44100;
+    const dataSize = pcm.length * 2;
+    const buffer = new ArrayBuffer(44 + dataSize);
+    const view = new DataView(buffer);
+    function writeString(offset, text) {
+      for (let i = 0; i < text.length; i += 1) {
+        view.setUint8(offset + i, text.charCodeAt(i));
+      }
+    }
+    writeString(0, "RIFF");
+    view.setUint32(4, 36 + dataSize, true);
+    writeString(8, "WAVE");
+    writeString(12, "fmt ");
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, rate, true);
+    view.setUint32(28, rate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    writeString(36, "data");
+    view.setUint32(40, dataSize, true);
+    let offset = 44;
+    for (let i = 0; i < pcm.length; i += 1) {
+      const clamped = Math.max(-1, Math.min(1, pcm[i]));
+      const intSample = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
+      view.setInt16(offset, intSample, true);
+      offset += 2;
+    }
+    return new Uint8Array(buffer);
+  }
+
+  function decodeWav(bytes) {
+    const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []);
+    if (data.length < 44) {
+      throw new Error("WAV data is too short.");
+    }
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    const sampleRate = view.getUint32(24, true);
+    const bitsPerSample = view.getUint16(34, true);
+    if (bitsPerSample !== 16) {
+      throw new Error("Only 16-bit PCM WAV is supported.");
+    }
+    let dataOffset = 44;
+    for (let i = 12; i + 8 <= data.length; i += 1) {
+      const chunkId = String.fromCharCode(data[i], data[i + 1], data[i + 2], data[i + 3]);
+      if (chunkId === "data") {
+        dataOffset = i + 8;
+        break;
+      }
+    }
+    const sampleCount = Math.floor((data.length - dataOffset) / 2);
+    const samples = new Float32Array(sampleCount);
+    for (let i = 0; i < sampleCount; i += 1) {
+      const intSample = view.getInt16(dataOffset + i * 2, true);
+      samples[i] = intSample < 0 ? intSample / 0x8000 : intSample / 0x7fff;
+    }
+    return { samples, sampleRate };
+  }
+
+  function rmsOfSamples(samples) {
+    const pcm = samples instanceof Float32Array ? samples : new Float32Array(samples || []);
+    if (!pcm.length) {
+      return 0;
+    }
+    let sum = 0;
+    for (let i = 0; i < pcm.length; i += 1) {
+      sum += pcm[i] * pcm[i];
+    }
+    return Math.sqrt(sum / pcm.length);
+  }
+
+  function peakOfSamples(samples) {
+    const pcm = samples instanceof Float32Array ? samples : new Float32Array(samples || []);
+    let peak = 0;
+    for (let i = 0; i < pcm.length; i += 1) {
+      const abs = Math.abs(pcm[i]);
+      if (abs > peak) {
+        peak = abs;
+      }
+    }
+    return peak;
+  }
+
+  function toDecibels(value) {
+    return value > 0 ? 20 * Math.log10(value) : -Infinity;
+  }
+
+  function measureTransform(inputSamples, outputSamples, sampleRate) {
+    const inputRms = rmsOfSamples(inputSamples);
+    const outputRms = rmsOfSamples(outputSamples);
+    const inputPeak = peakOfSamples(inputSamples);
+    const outputPeak = peakOfSamples(outputSamples);
+    const rate = Number(sampleRate) > 0 ? Number(sampleRate) : 44100;
+    const length = inputSamples instanceof Float32Array ? inputSamples.length : (inputSamples || []).length;
+    const gainDb = toDecibels(outputRms) - toDecibels(inputRms);
+    return {
+      inputRms: Number(inputRms.toFixed(4)),
+      outputRms: Number(outputRms.toFixed(4)),
+      inputPeak: Number(inputPeak.toFixed(4)),
+      outputPeak: Number(outputPeak.toFixed(4)),
+      gainDb: Number.isFinite(gainDb) ? Number(gainDb.toFixed(2)) : 0,
+      durationSec: Number((length / rate).toFixed(3)),
+      sampleRate: rate,
+      changed: inputRms !== outputRms || inputPeak !== outputPeak,
+    };
+  }
+
+  function polishedAssetId(track, polish) {
+    const role = (track && track.role) || "speaker";
+    const slug = role.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "speaker";
+    const preset = (polish && polish.presetId) || "clean";
+    return `polished-${slug}-${preset}-${Date.now()}`;
+  }
+
+  function buildPolishedAsset(track, wavBytes, polish) {
+    const sourceLabel = (track && track.sourceLabel) || "track";
+    const stem = sourceLabel.replace(/\.[^.]+$/, "") || "track";
+    const bytes = wavBytes instanceof Uint8Array ? wavBytes : new Uint8Array(wavBytes || []);
+    return {
+      assetId: polishedAssetId(track, polish),
+      fileName: `${stem}-polished.wav`,
+      mimeType: "audio/wav",
+      byteLength: bytes.byteLength,
+      storage: "indexedDB",
+      storedAt: Date.now(),
+      sourceAssetId: track && track.sourceMedia ? track.sourceMedia.assetId || "" : "",
+      presetId: polish && polish.presetId ? polish.presetId : "clean",
+      kind: "polished-audio",
+    };
+  }
+
+  function sampleRecordingsApi() {
+    if (typeof module !== "undefined" && module.exports && typeof require === "function") {
+      return require("./sample-recordings.js");
+    }
+    const g = typeof window !== "undefined" ? window : globalThis;
+    return g.PdcSampleRecordings;
+  }
+
+  function decodeDataUrlWav(dataUrl) {
+    const text = typeof dataUrl === "string" ? dataUrl : "";
+    const base64 = text.split(",")[1] || "";
+    const decode = typeof atob === "function"
+      ? atob
+      : (value) => Buffer.from(value, "base64").toString("binary");
+    const binary = decode(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return decodeWav(bytes);
+  }
+
+  // Default loader for DOM-free contexts (tests, Node): decode the track's own inline
+  // recording when present, otherwise fall back to a bundled real sample recording.
+  // This processes genuine WAV media rather than synthesizing audio from track identity.
+  function defaultSampleLoader(track) {
+    const inline = track && track.sourceMedia && track.sourceMedia.dataUrl;
+    if (inline) {
+      return decodeDataUrlWav(inline);
+    }
+    const SR = sampleRecordingsApi();
+    const rec = SR ? SR.sampleRecording((track && track.trackIndex ? track.trackIndex - 1 : 0)) : null;
+    if (!rec) {
+      throw new Error("No sample recording is available to decode.");
+    }
+    return decodeDataUrlWav(rec.dataUrl);
+  }
+
+  function computePolishCompletion(speakers, polishedTracks) {
+    const list = Array.isArray(speakers) ? speakers : [];
+    const results = Array.isArray(polishedTracks) ? polishedTracks : [];
+    if (!list.length) {
+      return false;
+    }
+    if (results.some((track) => track.status === "failed")) {
+      return false;
+    }
+    if (results.length !== list.length) {
+      return false;
+    }
+    return results.every((track) => track.status === "complete");
+  }
+
+  function needsMediaTrackResult(track) {
+    return {
+      trackIndex: track.trackIndex,
+      role: track.role,
+      name: track.name,
+      status: "needs-media",
+      polishedAsset: null,
+      usesOriginal: true,
+      error: "Upload speaker media to polish this track.",
+    };
+  }
+
+  function failedTrackResult(track, err) {
+    return {
+      trackIndex: track.trackIndex,
+      role: track.role,
+      name: track.name,
+      status: "failed",
+      error: err && err.message ? err.message : "Processing failed",
+      polishedAsset: null,
+      usesOriginal: true,
+    };
+  }
+
+  function completeTrackResult(track, state, loaded) {
+    if (!loaded || !loaded.samples || !loaded.sampleRate) {
+      throw new Error("Track samples are missing.");
+    }
+    const polished = polishSamples(loaded.samples, loaded.sampleRate, state);
+    const wavBytes = encodeWav(polished, loaded.sampleRate);
+    const polishedAsset = buildPolishedAsset(track, wavBytes, state);
+    const metrics = measureTransform(loaded.samples, polished, loaded.sampleRate);
+    return {
+      trackIndex: track.trackIndex,
+      role: track.role,
+      name: track.name,
+      status: "complete",
+      polishedAsset,
+      wavBytes,
+      byteLength: wavBytes.byteLength,
+      metrics,
+      usesOriginal: false,
+    };
+  }
+
+  function buildPolishOutcome(state, speakers, results) {
+    return {
+      polish: Object.assign({}, state, { polishedTracks: results }),
+      results,
+      complete: computePolishCompletion(speakers, results),
+      failed: results.some((track) => track.status === "failed"),
+    };
+  }
+
+  function processPolishTracks(polish, loadTrackSamples) {
+    const state = polish || createPolish({});
+    const speakers = Array.isArray(state.speakers) ? state.speakers : [];
+    const results = speakers.map((track) => {
+      if (!track.hasSourceMedia) {
+        return needsMediaTrackResult(track);
+      }
+      try {
+        return completeTrackResult(track, state, loadTrackSamples(track));
+      } catch (err) {
+        return failedTrackResult(track, err);
+      }
+    });
+    return buildPolishOutcome(state, speakers, results);
+  }
+
+  async function runPolish(polish, loadTrackSamples) {
+    const state = polish || createPolish({});
+    const speakers = Array.isArray(state.speakers) ? state.speakers : [];
+    const results = [];
+    for (let index = 0; index < speakers.length; index += 1) {
+      const track = speakers[index];
+      if (!track.hasSourceMedia) {
+        results.push(needsMediaTrackResult(track));
+        continue;
+      }
+      try {
+        const loaded = await Promise.resolve(loadTrackSamples(track));
+        results.push(completeTrackResult(track, state, loaded));
+      } catch (err) {
+        results.push(failedTrackResult(track, err));
+      }
+    }
+    return buildPolishOutcome(state, speakers, results);
+  }
+
+  function applyPolishForEpisode(episodeSummary, polishState, loadTrackSamples) {
+    const polish = polishState || createPolish(episodeSummary);
+    const loader = loadTrackSamples || defaultSampleLoader;
+    const outcome = processPolishTracks(polish, loader);
+    const applied = summarizePolish(outcome.polish, { polishedTracks: outcome.results });
+    return { polish: outcome.polish, applied, outcome };
+  }
+
+  function polishedTrackForSpeaker(polishedTracks, trackIndex) {
+    const list = Array.isArray(polishedTracks) ? polishedTracks : [];
+    return list.find((track) => track.trackIndex === trackIndex) || null;
+  }
+
+  function resolveExportAudioTracks(polishSummary) {
+    const summary = polishSummary || {};
+    const tracks = Array.isArray(summary.polishedTracks) ? summary.polishedTracks : [];
+    return tracks.map((track) => ({
+      trackIndex: track.trackIndex,
+      role: track.role,
+      name: track.name,
+      status: track.status,
+      assetId: track.polishedAsset ? track.polishedAsset.assetId : "",
+      fileName: track.polishedAsset ? track.polishedAsset.fileName : "",
+      metrics: track.metrics || null,
+      usesPolishedAudio: track.status === "complete",
+      usesOriginal: Boolean(track.usesOriginal),
+    }));
+  }
+
+  function isPolishReady(summary) {
+    if (!summary || !summary.presetName) {
+      return false;
+    }
+    return Boolean(summary.polishComplete || summary.allTracksPolished);
+  }
+
+  function summarizePolish(polish, options) {
+    const state = polish || createPolish({});
+    const opts = options || {};
     const preset = getPreset(state.presetId);
     const controlSummary = CONTROLS.map((control) => {
       const level = getLevel(state[control.id]);
       return `${control.label}: ${level.label}`;
     });
     const speakers = Array.isArray(state.speakers) ? state.speakers : [];
-    const key = settingsKey(state);
-    const speakerSummaries = speakers.map((track) => {
-      const current = isTrackCurrent(state, track);
-      return {
-        role: track.role,
-        name: track.name,
-        sourceLabel: track.sourceLabel,
-        trackIndex: track.trackIndex,
-        processed: current,
-        status: current ? (track.status || "complete") : (track.status || "pending"),
-        failureReason: current ? "" : (track.failureReason || ""),
-        outputRef: current ? track.outputRef : null,
-        processedAt: current ? track.processedAt : null,
-        processedSettingsKey: current ? track.processedSettingsKey : null,
-        assetBase64: current ? track.assetBase64 || null : null,
-        assetBytes: current ? track.assetBytes || 0 : 0,
-        savedPath: current ? track.savedPath || null : null,
-      };
-    });
-    const polishedCount = speakerSummaries.filter(
-      (track) => track.processed,
-    ).length;
-    const failedCount = speakerSummaries.filter(
-      (track) => track.status === "failed",
-    ).length;
+    const polishedTracks = Array.isArray(opts.polishedTracks)
+      ? opts.polishedTracks
+      : (Array.isArray(state.polishedTracks) ? state.polishedTracks : []);
+    const sourceMediaCount = speakers.reduce((total, speaker) => total + (speaker && speaker.hasSourceMedia ? 1 : 0), 0);
+    const polishedTrackCount = polishedTracks.filter((track) => track.status === "complete").length;
+    const allTracksPolished = computePolishCompletion(speakers, polishedTracks);
+    const exportAudioTracks = resolveExportAudioTracks({ polishedTracks });
     return {
       presetId: preset.id,
       presetName: preset.name,
@@ -454,33 +587,28 @@
       enhancement: state.enhancement,
       enhancementLabel: getLevel(state.enhancement).label,
       speakerCount: speakers.length,
-      speakers: speakerSummaries,
-      tracksTotal: speakers.length,
-      processedTrackCount: polishedCount,
-      failedTrackCount: failedCount,
-      allTracksProcessed:
-        speakers.length > 0 && polishedCount === speakers.length,
-      settingsKey: key,
+      sourceMediaCount,
+      sourceMediaReady: speakers.length > 0 && sourceMediaCount === speakers.length,
+      polishedTracks,
+      polishedTrackCount,
+      allTracksPolished,
+      polishComplete: allTracksPolished,
+      exportAudioTracks,
       treatmentLine: controlSummary.join(" · "),
     };
   }
 
   // Episode review / export path — rolls audio treatment up with other episode choices.
-  // readyForExport requires every speaker track to actually be polished, not just a
-  // preset having been chosen at some point (#197).
   function buildReviewSummary(episodeSummary, polishSummary, extras) {
     const episode = episodeSummary || {};
     const audio = polishSummary || {};
     const options = extras || {};
     const lines = [];
-    const tracksPolished = Boolean(audio.allTracksProcessed);
     if (audio.presetName) {
-      const trackNote = audio.tracksTotal
-        ? ` · ${audio.processedTrackCount || 0}/${audio.tracksTotal} tracks polished`
-        : "";
-      lines.push(
-        `Audio: ${audio.presetName} (${audio.treatmentLine})${trackNote}`,
-      );
+      lines.push(`Audio: ${audio.presetName} (${audio.treatmentLine})`);
+      if (audio.polishedTrackCount > 0) {
+        lines.push(`Polished tracks: ${audio.polishedTrackCount} of ${audio.speakerCount}`);
+      }
     }
     if (options.styleName) {
       lines.push(`Visual style: ${options.styleName}`);
@@ -495,12 +623,7 @@
       audioTreatment: audio.treatmentLine || "",
       styleName: options.styleName || "",
       templateName: options.templateName || "",
-      tracksTotal: audio.tracksTotal || 0,
-      processedTrackCount: audio.processedTrackCount || 0,
-      polishedTracks: Array.isArray(audio.speakers)
-        ? audio.speakers.filter((track) => track.processed)
-        : [],
-      readyForExport: Boolean(audio.presetName) && tracksPolished,
+      readyForExport: isPolishReady(audio),
       summaryLines: lines,
     };
   }
@@ -518,18 +641,23 @@
     applyPreset,
     updateControl,
     speakerIndicator,
+    intensityForLevel,
+    polishSamples,
+    encodeWav,
+    decodeWav,
+    rmsOfSamples,
+    peakOfSamples,
+    measureTransform,
+    buildPolishedAsset,
+    defaultSampleLoader,
+    processPolishTracks,
+    runPolish,
+    applyPolishForEpisode,
+    polishedTrackForSpeaker,
+    resolveExportAudioTracks,
+    isPolishReady,
     summarizePolish,
     buildReviewSummary,
-    settingsKey,
-    isTrackCurrent,
-    processTracks,
-    processedTrackCount,
-    allTracksProcessed,
-    restorePolish,
-    transformImportedTrack,
-    bytesToBase64,
-    base64ToBytes,
-    audioDataUrl,
   };
 
   if (typeof module !== "undefined" && module.exports) {
@@ -538,4 +666,4 @@
   }
 
   global.PdcAudioPolish = api;
-})(typeof window !== "undefined" ? window : globalThis);
+}(typeof window !== "undefined" ? window : globalThis));

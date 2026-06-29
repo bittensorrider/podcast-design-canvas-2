@@ -36,6 +36,14 @@ test("home screen exposes one primary start CTA and quieter secondary paths", ()
   assert.ok(!ui.includes("Try publish flow"));
 });
 
+test("home screen surfaces active-step audio polish demo as the first primary CTA", () => {
+  assert.ok(ui.includes("home-active-step-banner"));
+  assert.ok(ui.includes("home-audio-polish-demo"));
+  assert.ok(ui.includes("Open audio polish demo →"));
+  assert.ok(ui.includes("renderHomeActiveStepBanner"));
+  assert.ok(styles.includes(".home-active-step-banner"));
+});
+
 test("home gallery spotlight renders preview thumbnails and browse entry", () => {
   assert.ok(ui.includes("renderHomeGallerySpotlight"));
   assert.ok(ui.includes("home-gallery-thumb-grid"));

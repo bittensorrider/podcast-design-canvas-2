@@ -28,6 +28,15 @@ function completeUploadDraft() {
     Object.assign(setup.createSpeaker("Guest 1"), { name: "Dana Kim", fileName: "dana.mp4" }),
     Object.assign(setup.createSpeaker("Guest 2"), { name: "Marco Vidal", fileName: "marco.mp4" }),
   ];
+  draft.speakers.forEach((speaker, index) => {
+    setup.attachSourceMediaAsset(speaker, {
+      assetId: `canvas-media-${index + 1}`,
+      fileName: speaker.fileName,
+      fileSize: 4096,
+      mimeType: "video/mp4",
+      storage: "indexedDB",
+    });
+  });
   return draft;
 }
 

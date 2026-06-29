@@ -72,15 +72,22 @@ test("ACCEPTANCE: fresh handoff summary rejects seeded demo episode titles", () 
   assert.strictEqual(setup.isFreshHandoffSummary(setup.summarize(demo)), false);
 });
 
+test("ACCEPTANCE: riverside-only setup does not fake-complete audio polish without uploaded bytes", () => {
+  const summary = setup.summarize(completeFreshDraft());
+  const polish = audio.applyPolishForEpisode(summary).applied;
+  assert.strictEqual(polish.polishComplete, false);
+  assert.ok(polish.exportAudioTracks.every((track) => !track.usesPolishedAudio));
+});
+
 test("ACCEPTANCE: workspace checklist and audio tracks reflect the fresh setup summary", () => {
   const summary = setup.summarize(completeFreshDraft());
   const selection = style.applyPresetToSelection(style.createSelection(), "studio-spotlight", false);
   const appliedStyle = style.summarizeStyle(selection, summary.speakerCount);
-  const polish = audio.createPolish(summary);
+  const polish = audio.applyPolishForEpisode(summary).applied;
 
   const ws = workspace.buildWorkspace(summary, {
     appliedStyle: appliedStyle,
-    audioPolish: audio.summarizePolish(polish),
+    audioPolish: polish,
     contextApproved: false,
   });
   const setupStage = workspace.getStage(ws, "setup");
@@ -89,10 +96,10 @@ test("ACCEPTANCE: workspace checklist and audio tracks reflect the fresh setup s
   assert.ok(setupStage.summary.includes("2 social links saved"));
 
   assert.deepStrictEqual(
-    polish.speakers.map((track) => track.name),
+    polish.exportAudioTracks.map((track) => track.name),
     ["Jordan Lee", "Priya Shah", "Chris Ortiz"],
   );
-  assert.ok(!polish.speakers.some((track) => /founders unfiltered|building in public|episode 12/i.test(track.name)));
+  assert.ok(!polish.exportAudioTracks.some((track) => /founders unfiltered|building in public|episode 12/i.test(track.name)));
 });
 
 test("ACCEPTANCE: setup handoff persists a new library episode instead of reusing show identity start", () => {

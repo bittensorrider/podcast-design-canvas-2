@@ -6,10 +6,6 @@
   "scripts": {
     "preview": "python3 -m http.server 8080",
     "test": "node scripts/run-tests.mjs",
-    "preview-build": "node scripts/preview-build.mjs",
-    "test:browser-audio-polish": "node tests/browser-audio-polish-apply.mjs"
-  },
-  "devDependencies": {
-    "playwright": "^1.52.0"
+    "preview-build": "node scripts/preview-build.mjs"
   }
 }

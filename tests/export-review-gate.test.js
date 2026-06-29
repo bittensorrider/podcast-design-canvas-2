@@ -28,6 +28,15 @@ function completeDraft() {
     Object.assign(setup.createSpeaker("Guest 1"), { name: "Dana Kim", fileName: "dana.mp4" }),
     Object.assign(setup.createSpeaker("Guest 2"), { name: "Alex Chen", fileName: "alex.mp4" }),
   ];
+  draft.speakers.forEach((speaker, index) => {
+    setup.attachSourceMediaAsset(speaker, {
+      assetId: `gate-media-${index + 1}`,
+      fileName: speaker.fileName,
+      fileSize: 4096,
+      mimeType: "video/mp4",
+      storage: "indexedDB",
+    });
+  });
   return draft;
 }
 
@@ -39,8 +48,7 @@ function exportContext(episode, options) {
   let contextReview = contextApi.createReview(episode);
   contextReview = contextApi.approveReview(contextReview);
   let publishReview = review.createReview(episode, {
-    // Fully polished (every track processed), not just a preset choice (#197).
-    audioPolish: audio.summarizePolish(audio.processTracks(audio.createPolish(episode))),
+    audioPolish: audio.applyPolishForEpisode(episode).applied,
     appliedStyle: style.summarizeStyle(selection, episode.speakerCount),
     templateName: "Founders Look",
     hasCanvas: true,
@@ -54,8 +62,7 @@ function exportContext(episode, options) {
     publishReview = review.approveReview(publishReview).review;
   }
   return {
-    // Fully polished (every track processed), not just a preset choice (#197).
-    audioPolish: audio.summarizePolish(audio.processTracks(audio.createPolish(episode))),
+    audioPolish: audio.applyPolishForEpisode(episode).applied,
     appliedStyle: style.summarizeStyle(selection, episode.speakerCount),
     templateName: "Founders Look",
     momentsSummary: moments.summarizeBoard(board),

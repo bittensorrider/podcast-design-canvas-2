@@ -64,15 +64,23 @@
     return n < 10 ? `0${n}` : String(n);
   }
 
+  // Display a timestamp as "M:SS" for sub-hour moments and "H:MM:SS" for hour-plus
+  // moments, so full-length episodes never drop the hour component (#266).
   function formatTime(totalSeconds) {
     const safe = Math.max(0, Math.floor(totalSeconds || 0));
-    const minutes = Math.floor(safe / 60);
+    const hours = Math.floor(safe / 3600);
+    const minutes = Math.floor((safe % 3600) / 60);
     const seconds = safe % 60;
+    if (hours > 0) {
+      return `${pad2(hours)}:${pad2(minutes)}:${pad2(seconds)}`;
+    }
     return `${minutes}:${pad2(seconds)}`;
   }
 
-  // Accept creator input like "1:30", "90", or "  2:05 " and normalize to "M:SS". Invalid
-  // input clamps to 0:00 rather than throwing, so the timeline can never break.
+  // Accept creator input like "1:30", "90", "  2:05 ", or hour-plus "1:12:34" / "01:12:34"
+  // and return the total seconds. Hour-plus input keeps its full hour component rather than
+  // being read as minutes:seconds. Invalid input clamps to 0 rather than throwing, so the
+  // timeline can never break.
   function parseTime(value) {
     if (typeof value === "number" && isFinite(value)) {
       return Math.max(0, Math.floor(value));
@@ -82,10 +90,19 @@
       return 0;
     }
     if (text.indexOf(":") >= 0) {
-      const parts = text.split(":");
-      const minutes = parseInt(parts[0], 10) || 0;
-      const seconds = parseInt(parts[1], 10) || 0;
-      return Math.max(0, minutes * 60 + Math.min(59, Math.max(0, seconds)));
+      const parts = text.split(":").map((part) => parseInt(part, 10) || 0);
+      let hours = 0;
+      let minutes = 0;
+      let seconds = 0;
+      if (parts.length >= 3) {
+        hours = Math.max(0, parts[0]);
+        minutes = Math.min(59, Math.max(0, parts[1]));
+        seconds = Math.min(59, Math.max(0, parts[2]));
+      } else {
+        minutes = Math.max(0, parts[0]);
+        seconds = Math.min(59, Math.max(0, parts[1]));
+      }
+      return Math.max(0, hours * 3600 + minutes * 60 + seconds);
     }
     const asSeconds = parseInt(text, 10);
     return isFinite(asSeconds) ? Math.max(0, asSeconds) : 0;

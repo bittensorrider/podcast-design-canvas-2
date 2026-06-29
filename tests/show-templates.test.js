@@ -19,6 +19,19 @@ function test(name, fn) {
   console.log(`  ok ${name}`);
 }
 
+function attachTestMedia(draft, prefix) {
+  draft.speakers.forEach((speaker, index) => {
+    setup.attachSourceMediaAsset(speaker, {
+      assetId: `${prefix}-${index + 1}`,
+      fileName: speaker.fileName,
+      fileSize: 4096,
+      mimeType: "video/mp4",
+      storage: "indexedDB",
+    });
+  });
+  return draft;
+}
+
 function completeUploadDraft() {
   const draft = setup.createDraft();
   draft.episodeName = "Founders Unfiltered #7";
@@ -28,7 +41,7 @@ function completeUploadDraft() {
     Object.assign(setup.createSpeaker("Guest 1"), { name: "Dana Kim", fileName: "dana.mp4" }),
     Object.assign(setup.createSpeaker("Guest 2"), { name: "Marco Vidal", fileName: "marco.mp4" }),
   ];
-  return draft;
+  return attachTestMedia(draft, "show-template-media");
 }
 
 function twoSpeakerDraft() {
@@ -39,7 +52,7 @@ function twoSpeakerDraft() {
     Object.assign(setup.createSpeaker("Host"), { name: "Alex Chen", fileName: "alex.mp4" }),
     Object.assign(setup.createSpeaker("Guest 1"), { name: "Jordan Lee", fileName: "jordan.mp4" }),
   ];
-  return draft;
+  return attachTestMedia(draft, "show-template-two-speaker-media");
 }
 
 test("listTemplates returns saved templates sorted by name", () => {

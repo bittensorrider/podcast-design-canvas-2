@@ -115,12 +115,40 @@
     return { ok: true };
   }
 
+  function audioPolishApi() {
+    if (typeof module !== "undefined" && module.exports && typeof require === "function") {
+      return require("./audio-polish.js");
+    }
+    const g = typeof window !== "undefined" ? window : globalThis;
+    return g.PdcAudioPolish;
+  }
+
+  function validatePolishedAudioAssets(context) {
+    const ctx = context || {};
+    const AP = audioPolishApi();
+    const polish = ctx.audioPolish || {};
+    if (!AP || !AP.isPolishReady(polish)) {
+      return { ok: false };
+    }
+    const tracks = AP.resolveExportAudioTracks(polish);
+    const speakerCount = polish.speakerCount || 0;
+    const polished = tracks.filter((track) => track.usesPolishedAudio && track.assetId);
+    if (polished.length < speakerCount) {
+      return {
+        ok: false,
+        error: "Apply audio polish to generate polished tracks before exporting.",
+        missing: ["audio"],
+      };
+    }
+    return { ok: true, audioTracks: polished };
+  }
+
   function validateReadiness(context) {
     const ctx = context || {};
     const missing = [];
-    // Every speaker track must actually be polished before export can use it —
-    // a chosen preset alone used to satisfy this check (#197).
-    if (!ctx.audioPolish || !ctx.audioPolish.presetName || !ctx.audioPolish.allTracksProcessed) {
+    const AP = audioPolishApi();
+    const audioReady = AP ? AP.isPolishReady(ctx.audioPolish) : Boolean(ctx.audioPolish && ctx.audioPolish.presetName);
+    if (!audioReady) {
       missing.push("audio");
     }
     if (!ctx.appliedStyle || !ctx.appliedStyle.presetName) {
@@ -129,7 +157,15 @@
     if (missing.length) {
       return { ok: false, error: missingMessage(missing), missing };
     }
-    return { ok: true };
+    const audioAssets = validatePolishedAudioAssets(ctx);
+    if (!audioAssets.ok) {
+      return {
+        ok: false,
+        error: audioAssets.error || missingMessage(["audio"]),
+        missing: audioAssets.missing || ["audio"],
+      };
+    }
+    return { ok: true, audioTracks: audioAssets.audioTracks };
   }
 
   function updateOption(state, key, value) {
@@ -157,10 +193,17 @@
     lines.push(`${episode.speakerCount || 0} speaker${episode.speakerCount === 1 ? "" : "s"} · ${episode.sourceModeLabel || "sources"}`);
 
     if (ctx.audioPolish && ctx.audioPolish.presetName) {
-      const trackNote = ctx.audioPolish.tracksTotal
-        ? ` · ${ctx.audioPolish.processedTrackCount || 0}/${ctx.audioPolish.tracksTotal} tracks polished`
-        : "";
-      lines.push(`Audio: ${ctx.audioPolish.presetName} (${ctx.audioPolish.treatmentLine || "treatment applied"})${trackNote}`);
+      const polishedCount = ctx.audioPolish.polishedTrackCount || 0;
+      const audioLine = polishedCount > 0
+        ? `Audio: ${ctx.audioPolish.presetName} (${ctx.audioPolish.treatmentLine || "treatment applied"}) · ${polishedCount} polished track${polishedCount === 1 ? "" : "s"}`
+        : `Audio: ${ctx.audioPolish.presetName} (${ctx.audioPolish.treatmentLine || "treatment applied"})`;
+      lines.push(audioLine);
+    }
+    if (job.audioTracks && job.audioTracks.length) {
+      const assetLine = job.audioTracks
+        .map((track) => `${track.fileName || track.assetId} (${track.assetId})`)
+        .join(", ");
+      lines.push(`Audio render: ${assetLine}`);
     }
     if (ctx.appliedStyle && ctx.appliedStyle.presetName) {
       lines.push(
@@ -198,11 +241,6 @@
       platformName: platform.name,
       resolutionLabel: resolution.label,
       captionLabel: captions.label,
-      // The render/export job consumes these polished output refs — never the
-      // speaker tracks' original raw source files (#197).
-      polishedAudioTracks: ctx.audioPolish && Array.isArray(ctx.audioPolish.speakers)
-        ? ctx.audioPolish.speakers.filter((track) => track.processed)
-        : [],
     };
   }
 
@@ -226,8 +264,29 @@
     return { ok: true, state: next };
   }
 
-  function completeExport(state, episodeSummary) {
-    const next = clone(state || createExport(episodeSummary));
+  function attachPolishedAudioToExport(state, context) {
+    const next = clone(state || createExport({}));
+    const ctx = context || {};
+    const AP = audioPolishApi();
+    const exportTracks = AP ? AP.resolveExportAudioTracks(ctx.audioPolish || {}) : [];
+    const polished = exportTracks.filter((track) => track.usesPolishedAudio && track.assetId);
+    next.audioTracks = polished.map((track) => ({
+      trackIndex: track.trackIndex,
+      role: track.role,
+      name: track.name,
+      assetId: track.assetId,
+      fileName: track.fileName,
+    }));
+    next.usesPolishedAudio = polished.length > 0
+      && polished.length === (ctx.audioPolish && ctx.audioPolish.speakerCount ? ctx.audioPolish.speakerCount : polished.length);
+    next.audioSource = polished.length
+      ? `polished-wav:${polished.map((track) => track.assetId).join(",")}`
+      : "";
+    return next;
+  }
+
+  function completeExport(state, episodeSummary, context) {
+    const next = attachPolishedAudioToExport(state, context);
     const episode = episodeSummary || {};
     next.status = "ready";
     next.progress = 100;
@@ -241,7 +300,7 @@
     if (!started.ok) {
       return started;
     }
-    return { ok: true, state: completeExport(started.state, episodeSummary) };
+    return { ok: true, state: completeExport(started.state, episodeSummary, context) };
   }
 
   function summarizeExport(state) {
@@ -249,6 +308,7 @@
     const platform = getPlatform(job.platform);
     const resolution = getResolution(job.resolution);
     const captions = getCaptionMode(job.captionMode);
+    const audioTracks = Array.isArray(job.audioTracks) ? job.audioTracks : [];
     return {
       status: job.status || "draft",
       progress: job.progress || 0,
@@ -257,6 +317,9 @@
       captionLabel: captions.label,
       templateName: job.templateName || "",
       downloadName: job.downloadName || "",
+      audioTrackCount: audioTracks.length,
+      audioAssetIds: audioTracks.map((track) => track.assetId),
+      usesPolishedAudio: Boolean(job.usesPolishedAudio),
       ready: job.status === "ready",
       rendering: job.status === "rendering",
     };
@@ -271,6 +334,7 @@
     getCaptionMode,
     createExport,
     validateReadiness,
+    validatePolishedAudioAssets,
     validatePublishReviewGate,
     validateExportAuthorization,
     updateOption,

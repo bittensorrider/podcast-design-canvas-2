@@ -27,6 +27,15 @@ function completeDraft() {
     Object.assign(setup.createSpeaker("Host"), { name: "Sam Rivera", fileName: "sam.mp4" }),
     Object.assign(setup.createSpeaker("Guest 1"), { name: "Dana Kim", fileName: "dana.mp4" }),
   ];
+  draft.speakers.forEach((speaker, index) => {
+    setup.attachSourceMediaAsset(speaker, {
+      assetId: `workspace-media-${index + 1}`,
+      fileName: speaker.fileName,
+      fileSize: 4096,
+      mimeType: "video/mp4",
+      storage: "indexedDB",
+    });
+  });
   return draft;
 }
 
@@ -36,9 +45,7 @@ function baseCtx(episode, overrides) {
   board = moments.addMoment(board, "caption", { time: 30, text: "Welcome", speakerRole: "Host" });
   return Object.assign({
     appliedStyle: style.summarizeStyle(selection, episode.speakerCount),
-    // "Complete" audio in this fixture means every track has actually been
-    // processed, not just a preset chosen (#197).
-    audioPolish: audio.summarizePolish(audio.processTracks(audio.createPolish(episode))),
+    audioPolish: audio.applyPolishForEpisode(episode).applied,
     templateName: "Founders Format",
     momentsSummary: moments.summarizeBoard(board),
     contextApproved: true,

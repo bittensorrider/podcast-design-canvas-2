@@ -71,6 +71,37 @@ test("createCorrectionReview populates lines from social context and visual mome
   assert.ok(review.lines.some((line) => line.kind === "transcript"));
 });
 
+test("hour-plus moment lines keep their place and hour in the review order (#266)", () => {
+  const episode = setup.summarize(draftWithSocial());
+  const contextReview = context.approveReview(context.createReview(episode));
+  let board = moments.createBoard(episode);
+  board = moments.addMoment(board, "title", {
+    time: "2:30",
+    text: "Building in public",
+    speakerRole: "Host",
+    speakerName: "Sam Rivera",
+  });
+  board = moments.addMoment(board, "caption", {
+    time: "01:30:00",
+    text: "Closing thoughts",
+    speakerRole: "Host",
+    speakerName: "Sam Rivera",
+  });
+
+  const review = correction.createCorrectionReview(episode, {
+    contextReview: contextReview,
+    momentsBoard: board,
+  });
+
+  const hourLine = review.lines.find((line) => line.momentId && line.originalText === "Closing thoughts");
+  const earlyLine = review.lines.find((line) => line.momentId && line.originalText === "Building in public");
+  assert.strictEqual(hourLine.time, "01:30:00", "hour-plus moment keeps its hour in review");
+  assert.ok(
+    review.lines.indexOf(hourLine) > review.lines.indexOf(earlyLine),
+    "hour-plus moment sorts after the 2:30 moment rather than collapsing to 30:00",
+  );
+});
+
 test("createCorrectionReview keeps already-correct speaker names exact", () => {
   const episode = setup.summarize(draftWithSocial());
   const contextReview = context.approveReview(context.createReview(episode));
@@ -146,7 +177,7 @@ test("summarizeCorrection feeds export metadata after approval", () => {
   const summary = correction.summarizeCorrection(review);
 
   const exportSummary = exportApi.buildFinalSummary(episode, {
-    audioPolish: audio.summarizePolish(audio.createPolish(episode)),
+    audioPolish: audio.applyPolishForEpisode(episode).applied,
     appliedStyle: style.summarizeStyle(style.createSelection(), episode.speakerCount),
     correctionSummary: summary,
   }, exportApi.createExport(episode));
